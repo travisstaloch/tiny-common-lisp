@@ -1,0 +1,107 @@
+const std = @import("std");
+const assert = std.debug.assert;
+const Parser = @This();
+
+const Ast = @import("Ast.zig");
+const Expr = Ast.Expr;
+const Tokenizer = @import("Tokenizer.zig");
+const primitives = @import("primitives.zig");
+
+t: Tokenizer,
+
+stack: std.ArrayList(struct { Expr.Id, Tokenizer.Token }) = .{},
+ast: Ast,
+
+pub fn deinit(p: *Parser) void {
+    p.exprs.deinit(p.gpa);
+    p.stack.deinit(p.gpa);
+    p.strs.deinit(p.gpa);
+    p.root_env.deinit(p.gpa);
+}
+
+/// append 'new' to the cons at the top of the stack
+pub fn pushExpr(p: *Parser, new: Ast.Iterator, tok: Tokenizer.Token) !void {
+    // std.debug.print("stack.len {}\n", .{p.stack.items.len});
+
+    const lastid, _ = p.stack.items[p.stack.items.len - 1];
+
+    // std.debug.print("pushExpr stack.len {} lastid {} {}\n", .{ p.stack.items.len, lastid, new.expr().* });
+
+    _ = try lastid.iterator(&p.ast).append(new);
+
+    if (new.expr().* == .cons) try p.stack.append(p.ast.gpa, .{ new.id, tok });
+}
+
+pub const Error = std.mem.Allocator.Error || error{UnbalancedParens} || std.fmt.ParseFloatError;
+
+pub fn parse(src: [:0]const u8, gpa: std.mem.Allocator) Error!Ast {
+    var p: Parser = .{
+        .t = .{ .src = src },
+        .ast = .{ .gpa = gpa, .root_env = .nil, .root_list = .nil },
+    };
+
+    p.ast.root_env = (try Ast.Env.init(&p.ast)).id;
+    // std.debug.print("parse env {}\n", .{p.ast.getExpr(p.ast.root_env).env});
+
+    defer p.stack.deinit(gpa);
+    errdefer p.ast.deinit();
+
+    const root = try p.ast.createExpr(.{ .cons = .empty });
+    p.ast.root_list = root.id;
+    try p.stack.append(gpa, .{ root.id, .{ .start = 0, .end = 0, .tag = .lparen } });
+
+    while (true) {
+        const tok = p.t.next();
+        // std.debug.print("{t: <10} {: >4}:{: >4} {s}\n", .{ tok.tag, tok.start, tok.end, tok.src(src) });
+        switch (tok.tag) {
+            .eof => break,
+            .lparen => {
+                const x = try p.ast.createExpr(.{ .cons = .empty });
+                try p.pushExpr(x, tok);
+            },
+            .rparen => {
+                _, const stok = p.stack.pop() orelse return error.UnbalancedParens;
+                if (stok.tag != .lparen) return error.UnbalancedParens;
+            },
+            .string, .symbol => {
+                const sym = try p.ast.internStr(tok.src(src));
+                try p.pushExpr(sym.iterator(&p.ast), tok);
+            },
+            .number => {
+                const num = try p.ast.createExpr(.{ .num = try std.fmt.parseFloat(f64, tok.src(src)) });
+                try p.pushExpr(num, tok);
+            },
+            else => std.debug.panic("TODO handle {t}\n", .{tok.tag}),
+        }
+    }
+
+    if (p.stack.items.len != 1) return error.UnbalancedParens;
+
+    return p.ast;
+}
+
+const testing = std.testing;
+const tgpa = testing.allocator;
+
+test Parser {
+    var ast = try Parser.parse("(+ 1 1)", tgpa);
+    defer ast.deinit();
+
+    { // check env
+        var iter = ast.root_env.iterator(&ast).expr().env.scope_list.iterator(&ast);
+        while (iter.next()) |sym| {
+            try testing.expectEqual(.sym, sym.tag());
+            try testing.expectEqual(.lam, iter.next().?.tag());
+        }
+    }
+
+    { // check body
+        var iter = ast.root_list.iterator(&ast).expr().cons.fst.iterator(&ast);
+        try testing.expectEqual(.sym, iter.next().?.tag());
+        try testing.expectEqual(.num, iter.next().?.tag());
+        try testing.expectEqual(.num, iter.next().?.tag());
+        try testing.expectEqual(null, iter.next());
+    }
+
+    try testing.expectFmt("(+ 1 1)", "{f}", .{ast.root_list.iterator(&ast)});
+}

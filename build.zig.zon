@@ -1,0 +1,19 @@
+.{
+    .name = .deme,
+    .version = "0.0.0",
+    .fingerprint = 0x369736beb43dd571, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.15.1",
+    .dependencies = .{
+        .flagset = .{
+            .url = "git+https://github.com/travisstaloch/flagset#c1de60ade2dd5e24c6841fa9afdd84b3a4ea146b",
+            .hash = "flagset-0.0.1-AVmOhUEjAQDogE2tnogzQYXAXov1p3JYF-6HEwMyMlnz",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        //"LICENSE",
+        //"README.md",
+    },
+}
