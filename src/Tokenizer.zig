@@ -77,10 +77,16 @@ fn isIdent2(byte: u8) bool {
 }
 
 fn isWhitespace(byte: u8) bool {
-    return switch (byte) {
-        ' ', '\n', '\t', '\r' => true,
-        else => false,
-    };
+    // TODO benchmark which is faster
+    if (false)
+        return switch (byte) {
+            ' ', '\n', '\t', '\r' => true,
+            else => false,
+        };
+
+    const V = @Vector(4, u8);
+    const x: [4]u8 = " \n\t\r".*;
+    return @reduce(.Or, x == @as(V, @splat(byte)));
 }
 
 fn peek(self: *Tokenizer, offset: usize) u8 {

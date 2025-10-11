@@ -120,10 +120,12 @@ pub const Expr = union(enum) {
     pub const Tag = std.meta.Tag(Expr);
     pub const empty_lst: Expr = .{ .cons = .empty };
 
-    pub fn getId(e: *const Expr, ast: *Ast) Id {
-        // TODO better way to catch stack pointers.  this assumes 8MB stack.
-        assert(e - ast.exprs.items.ptr < 1024 * 1024 * 8 / @sizeOf(Expr));
-        return @enumFromInt(e - ast.exprs.items.ptr);
+    /// e must be a pointer to a member of ast.exprs and not a stack pointer
+    pub fn id(e: *const Expr, ast: *Ast) Id {
+        const ret = e - ast.exprs.items.ptr;
+        if (ret >= ast.exprs.items.len)
+            @panic("invalid pointer.  not within ast.exprs.");
+        return @enumFromInt(ret);
     }
 
     pub const Id = enum(usize) {
@@ -135,7 +137,7 @@ pub const Expr = union(enum) {
     };
 
     pub fn builder(e: *const Expr, ast: *Ast) Iterator {
-        return .init(e.getId(ast), ast);
+        return .init(e.id(ast), ast);
     }
 };
 
@@ -164,13 +166,13 @@ pub const Iterator = struct {
     /// assumes lst is a cons.
     pub fn prepend(lst: Iterator, elem: Iterator) !Iterator {
         const lst_ptr = lst.expr();
-        const fst = lst_ptr.cons.fst;
-        if (fst == .nil) {
+        const cons = lst_ptr.cons;
+        if (cons.fst == .nil) {
             lst_ptr.cons.fst = elem.id;
             return lst;
         }
 
-        const new = try lst.ast.createExpr(.{ .cons = .{ .fst = elem.id, .snd = fst } });
+        const new = try lst.ast.createExpr(.{ .cons = .{ .fst = elem.id, .snd = cons.fst } });
         lst.expr().cons.fst = new.id;
         return new;
     }
@@ -228,6 +230,7 @@ pub const Iterator = struct {
         try w.flush();
     }
 
+    /// i.id must be a cons or nil
     pub fn next(i: *Iterator) ?Iterator {
         if (i.id == .nil) return null;
         const cons = i.expr().cons;
@@ -254,6 +257,7 @@ pub const Cons = struct {
 };
 
 test Cons {
+    _ = Cons;
     var ast = default_ast;
     defer ast.deinit();
     var iter = try ast.newList(&.{ .{ .num = 1 }, .{ .num = 2 } });
@@ -261,32 +265,4 @@ test Cons {
     try std.testing.expectEqual(1, iter.next().?.expr().num);
     try std.testing.expectEqual(2, iter.next().?.expr().num);
     try std.testing.expectEqual(null, iter.next());
-}
-
-test {
-    _ = Ast.Cons;
-    _ =
-        \\
-        \\10
-        \\(+ 5 3 4)
-        \\(- 9 1)
-        \\(/ 6 2)
-        \\(+ (* 2 4) (- 4 6))
-        \\(define a 3)
-        \\(define b (+ a 1))
-        \\(+ a b (* a b))
-        \\(= a b)
-        \\(if (and (> b a) (< b (* a b)))
-        \\b
-        \\a)
-        \\(cond ((= a 4) 6)
-        \\((= b 4) (+ 6 7 a))
-        \\(else 25))
-        \\(+ 2 (if (> b a) b a))
-        \\(* (cond ((> a b) a)
-        \\((< a b) b)
-        \\(else -1))
-        \\(+ a 1))
-        \\
-    ;
 }

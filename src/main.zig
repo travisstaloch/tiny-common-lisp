@@ -32,21 +32,3 @@ pub fn main() !void {
     defer ast.deinit();
     std.debug.print("{f}\n{f}\n", .{ ast.root_env.iterator(&ast), ast.root_list.iterator(&ast) });
 }
-
-fn checkEval(s: []const u8) !void {
-    _ = s; // autofix
-    var ctx = deme.Ast.default_ast;
-    defer ctx.deinit();
-}
-
-test {
-    try checkEval(
-        \\> (quote a)
-        \\  a
-        \\> 'a
-        \\  a
-        \\> (quote a b c)
-        \\  (a b c)
-        \\
-    );
-}
