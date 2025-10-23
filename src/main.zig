@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const deme = @import("deme");
 const flagset = @import("flagset");
+const anyline = @import("anyline");
 
 const flags = [_]flagset.Flag{
     .{ .type = []const u8, .name = "file", .options = .{ .kind = .positional } },
@@ -30,5 +31,13 @@ pub fn main() !void {
     const src = w.written()[0..end :0];
     var ast = try deme.Parser.parse(src, gpa);
     defer ast.deinit();
-    std.debug.print("{f}\n{f}\n", .{ ast.root_env.iterator(&ast), ast.root_list.iterator(&ast) });
+    std.debug.print("{f}\n{f}\n{f}\n", .{ ast.root_env.iterator(&ast), ast.root_lst.iterator(&ast), ast.dump() });
+    anyline.using_history();
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    while (true) {
+        const line = try anyline.readline(arena.allocator(), " > ");
+        std.debug.print("{s}", .{line});
+        try anyline.add_history(gpa, line);
+    }
 }

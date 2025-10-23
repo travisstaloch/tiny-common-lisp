@@ -15,7 +15,7 @@ pub fn getFunc(prim: Primitive) Func {
     };
 }
 
-fn argsAs(T: type, comptime field: Ast.Expr.Tag, args: Ast.Iterator) struct { T, Ast.Iterator } {
+fn argsAs(T: type, comptime field: Ast.Expr.Tag, args: Ast.Iterator, env: Expr.Id) !struct { T, Ast.Iterator } {
     if (false) {
         var iter = args;
         while (iter.next()) |arg| {
@@ -26,27 +26,27 @@ fn argsAs(T: type, comptime field: Ast.Expr.Tag, args: Ast.Iterator) struct { T,
         .array => |a| {
             var ret: T = undefined;
             var iter = args;
-            for (0..a.len) |i| ret[i] = iter.next().?.as(field);
+            for (0..a.len) |i| ret[i] = (iter.next() orelse
+                return err(args, env, error.Args)).as(field);
             return .{ ret, iter };
         },
         else => unreachable,
     }
 }
 
+fn err(args: Ast.Iterator, env: Expr.Id, e: Ast.Error) Ast.Error {
+    _ = args; // autofix
+    _ = env; // autofix
+    std.debug.print("TODO log error location\n", .{});
+    return e;
+}
+
 const methods = struct {
     const Ret = Ast.Error!RetRest;
     const RetRest = struct { id: Expr.Id, rest: Expr.Id };
 
-    fn err(args: Ast.Iterator, env: Expr.Id, e: Ast.Error) Ret {
-        _ = args; // autofix
-        _ = env; // autofix
-        std.debug.print("TODO log error location\n", .{});
-        return e;
-    }
-
     pub fn @"+"(args: Ast.Iterator, env: Expr.Id) Ret {
-        _ = env; // autofix
-        const res, const rest = argsAs([2]f64, .num, args);
+        const res, const rest = try argsAs([2]f64, .num, args, env);
         const b = try args.ast.createExpr(.{ .num = res[0] + res[1] });
         return .{ .id = b.id, .rest = rest.id };
     }
@@ -91,14 +91,14 @@ const methods = struct {
     test @"+" {
         var ast = try Parser.parse("(+ 1 2)", t_gpa);
         defer ast.deinit();
-        const x = try methods.eval(ast.root_list.iterator(&ast), ast.root_env);
+        const x = try methods.eval(ast.root_lst.iterator(&ast), ast.root_env);
         try testing.expectEqual(3, x.id.iterator(&ast).as(.num));
     }
 
     test car {
         var ast = try Parser.parse("(car (1 2))", t_gpa);
         defer ast.deinit();
-        const x = try methods.eval(ast.root_list.iterator(&ast), ast.root_env);
+        const x = try methods.eval(ast.root_lst.iterator(&ast), ast.root_env);
         var iter = x.id.iterator(&ast);
         try testing.expectEqual(1, iter.next().?.as(.num));
     }

@@ -5,17 +5,17 @@ const Tokenizer = @import("Tokenizer.zig");
 const Token = Tokenizer.Token;
 const primitives = @import("primitives.zig");
 const t_gpa = std.testing.allocator;
-pub const default_ast = Ast{ .gpa = t_gpa, .root_env = .nil, .root_list = undefined };
+pub const empty = Ast{ .gpa = t_gpa, .root_env = .nil, .root_lst = .nil };
 const Parser = @import("Parser.zig");
-pub const Error = error{Eval} || Allocator.Error || Parser.Error;
-
 const Ast = @This();
+pub const Error = error{ Eval, Args } || Allocator.Error || Parser.Error;
 
 gpa: std.mem.Allocator,
 exprs: std.ArrayList(Expr) = .{},
 syms: std.StringArrayHashMapUnmanaged(Expr.Id) = .{},
+toks: std.ArrayList(Tokenizer.Token) = .{},
 root_env: Expr.Id,
-root_list: Expr.Id,
+root_lst: Expr.Id,
 
 pub fn deinit(ast: *Ast) void {
     ast.exprs.deinit(ast.gpa);
@@ -135,15 +135,28 @@ pub const Expr = union(enum) {
 
         pub const iterator = Iterator.init;
     };
-
-    pub fn builder(e: *const Expr, ast: *Ast) Iterator {
-        return .init(e.id(ast), ast);
-    }
 };
+
+pub fn dump(ast: *Ast, src: [:0]const u8) Dump {
+    return .{ .data = .{ .ast = ast, .src = src } };
+}
+const DumpData = struct { ast: *Ast, src: [:0]const u8 };
+const Dump = std.fmt.Alt(DumpData, formatDump);
+
+fn formatDump(d: DumpData, w: *std.Io.Writer) !void {
+    try w.print("roots {} {}\n", .{ d.ast.root_env, d.ast.root_lst });
+    for (d.ast.exprs.items, 0..) |e, i| {
+        try w.print("{: >4} {}\n", .{ i, e });
+    }
+    for (d.ast.toks.items, 0..) |t, i| {
+        try w.print("{: >4} '{s}'\n", .{ i, t.src(d.src) });
+    }
+}
 
 /// methods for Expr.Ids
 pub const Iterator = struct {
     id: Expr.Id,
+    // TODO remove ast arg and make it implicit with @fieldParentPtr somehow?
     ast: *Ast,
 
     pub fn init(id: Expr.Id, ast: *Ast) Iterator {
@@ -154,6 +167,10 @@ pub const Iterator = struct {
         return &i.ast.exprs.items[@intFromEnum(i.id)];
     }
 
+    pub fn token(i: Iterator) Token {
+        return i.ast.toks.items[@intFromEnum(i.id)];
+    }
+
     pub fn as(i: Iterator, comptime t: Expr.Tag) @FieldType(Expr, @tagName(t)) {
         return @field(i.expr(), @tagName(t));
     }
@@ -162,19 +179,40 @@ pub const Iterator = struct {
         return i.expr().*;
     }
 
+    /// id must be a cons or nil
+    pub fn next(i: *Iterator) ?Iterator {
+        if (i.id == .nil) return null;
+        const e = i.expr().*;
+        if (e != .cons or e.cons.fst == .nil) return null;
+        i.id = e.cons.snd;
+        return .{ .id = e.cons.fst, .ast = i.ast };
+    }
+
+    pub fn count(i: Iterator) usize {
+        var ret: usize = 0;
+        var iter = i;
+        while (iter.next()) |_| : (ret += 1) {
+            // std.debug.print("{} id {}\n", .{ ret, it.id });
+        }
+        return ret;
+    }
+
+    
     /// prepend e to lst.  returns new head.
     /// assumes lst is a cons.
     pub fn prepend(lst: Iterator, elem: Iterator) !Iterator {
-        const lst_ptr = lst.expr();
-        const cons = lst_ptr.cons;
+        const lstp = lst.expr();
+        const cons = lstp.cons;
         if (cons.fst == .nil) {
-            lst_ptr.cons.fst = elem.id;
+            lstp.cons.fst = elem.id;
             return lst;
         }
 
-        const new = try lst.ast.createExpr(.{ .cons = .{ .fst = elem.id, .snd = cons.fst } });
-        lst.expr().cons.fst = new.id;
-        return new;
+        const fst = try lst.ast.createExpr(.{
+            .cons = .{ .fst = elem.id, .snd = cons.fst },
+        });
+        lst.expr().cons.fst = fst.id;
+        return fst;
     }
 
     /// assumes lst is a cons.
@@ -188,7 +226,9 @@ pub const Iterator = struct {
             ex.cons.fst = elem.id;
             return lst;
         } else if (c.snd == .nil) {
-            const snd = try lst.ast.createExpr(.{ .cons = .{ .fst = elem.id, .snd = .nil } });
+            const snd = try lst.ast.createExpr(
+                .{ .cons = .{ .fst = elem.id, .snd = .nil } },
+            );
             lst.expr().cons.snd = snd.id;
             return lst;
         } else {
@@ -208,7 +248,7 @@ pub const Iterator = struct {
             .sym => |s| _ = try w.write(s.str(i.ast)),
             .num => |s| _ = try w.print("{d}", .{s}),
             .cons => {
-                if (i.id != i.ast.root_list) _ = try w.write("("); // skip paren at root
+                if (i.id != i.ast.root_lst) _ = try w.write("("); // skip paren at root
                 // try w.print("{} . {}\n", .{ l.fst, l.snd });
                 var idx: usize = 0;
                 var iter = i;
@@ -216,7 +256,7 @@ pub const Iterator = struct {
                     if (idx != 0) _ = try w.write(" ");
                     try id.format(w);
                 }
-                if (i.id != i.ast.root_list) _ = try w.write(")"); // skip paren at root
+                if (i.id != i.ast.root_lst) _ = try w.write(")"); // skip paren at root
             },
             .env => |x| {
                 try w.print("(env {f})", .{x.scope_list.iterator(i.ast)});
@@ -228,20 +268,6 @@ pub const Iterator = struct {
             // else => |x| std.debug.panic("TODO {t}", .{x}),
         }
         try w.flush();
-    }
-
-    /// i.id must be a cons or nil
-    pub fn next(i: *Iterator) ?Iterator {
-        if (i.id == .nil) return null;
-        const cons = i.expr().cons;
-        if (cons.fst == .nil) return null;
-
-        i.id = if (cons.snd == .nil)
-            .nil
-        else
-            cons.snd;
-
-        return .{ .id = cons.fst, .ast = i.ast };
     }
 };
 
@@ -258,7 +284,7 @@ pub const Cons = struct {
 
 test Cons {
     _ = Cons;
-    var ast = default_ast;
+    var ast = empty;
     defer ast.deinit();
     var iter = try ast.newList(&.{ .{ .num = 1 }, .{ .num = 2 } });
 

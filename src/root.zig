@@ -4,10 +4,40 @@ const Type = std.builtin.Type;
 pub const Tokenizer = @import("Tokenizer.zig");
 pub const Parser = @import("Parser.zig");
 pub const Ast = @import("Ast.zig");
+pub const primitives = @import("primitives.zig");
 
 test {
     _ = Tokenizer;
     _ = Parser;
     _ = Ast;
-    _ = @import("primitives.zig");
+    _ = primitives;
+}
+
+// parse, format, parse check tokens equal
+fn checkFile(path: []const u8, gpa: std.mem.Allocator) !void {
+    var arena_ = std.heap.ArenaAllocator.init(gpa);
+    defer arena_.deinit();
+    const arena = arena_.allocator();
+    var f = try std.fs.cwd().openFile(path, .{});
+    defer f.close();
+    var fr = f.reader(&.{});
+    const src1 = try arena.allocSentinel(u8, try f.getEndPos(), 0);
+
+    std.debug.assert(src1.len == try fr.interface.readSliceShort(src1));
+    var ast1 = try Parser.parse(src1, arena);
+    var iter1 = ast1.root_lst.iterator(&ast1);
+    const src2 = try std.fmt.allocPrintSentinel(arena, "{f}", .{iter1}, 0);
+    var ast2 = try Parser.parse(src2, arena);
+
+    var iter2 = ast2.root_lst.iterator(&ast2);
+    while (iter1.next()) |it1| {
+        try std.testing.expectEqual(it1.id, iter2.next().?.id);
+    }
+    try std.testing.expect(iter2.next() == null);
+}
+
+const t_gpa = std.testing.allocator;
+test "tokenize / format / tokenize" {
+    try checkFile("examples/basic.scm", t_gpa);
+    try checkFile("examples/fizzbuzz.scm", t_gpa);
 }

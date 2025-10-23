@@ -16,6 +16,8 @@ pub const Token = struct {
     end: u32,
     tag: Tag,
 
+    pub const empty: Token = .{ .start = 0, .end = 0, .tag = .invalid };
+
     pub const Tag = enum {
         invalid,
         eof,
@@ -41,6 +43,19 @@ pub const Token = struct {
 
     pub fn src(self: Token, s: [:0]const u8) []const u8 {
         return s[self.start..self.end];
+    }
+
+    pub fn line(self: Token, s: [:0]const u8) []const u8 {
+        var start = self.start;
+        while (start != 0) {
+            start -= 1;
+            if (s[start] == '\n') break;
+        }
+        var end = self.end;
+        while (end < s.len) : (end += 1) {
+            if (s[end] == '\n') break;
+        }
+        return s[start + @intFromBool(start != 0) .. end];
     }
 
     pub const Fmt = struct {

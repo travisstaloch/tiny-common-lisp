@@ -7,6 +7,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
     const flagset = b.dependency("flagset", .{});
+    const anyline = b.dependency("anyline", .{});
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -14,6 +15,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "deme", .module = mod },
             .{ .name = "flagset", .module = flagset.module("flagset") },
+            .{ .name = "anyline", .module = anyline.module("anyline") },
         },
     });
     const exe = b.addExecutable(.{
