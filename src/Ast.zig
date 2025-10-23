@@ -5,12 +5,17 @@ const Tokenizer = @import("Tokenizer.zig");
 const Token = Tokenizer.Token;
 const primitives = @import("primitives.zig");
 const t_gpa = std.testing.allocator;
-pub const empty = Ast{ .gpa = t_gpa, .root_env = .nil, .root_lst = .nil };
 const Parser = @import("Parser.zig");
 const Ast = @This();
 pub const Error = error{ Eval, Args } || Allocator.Error || Parser.Error;
+pub const Options = struct {
+    mode: union(enum) {
+        gpa: std.mem.Allocator,
+        measure,
+    },
+};
 
-gpa: std.mem.Allocator,
+options: Options,
 exprs: std.ArrayList(Expr) = .{},
 syms: std.StringArrayHashMapUnmanaged(Expr.Id) = .{},
 toks: std.ArrayList(Tokenizer.Token) = .{},
@@ -18,23 +23,42 @@ root_env: Expr.Id,
 root_lst: Expr.Id,
 
 pub fn deinit(ast: *Ast) void {
-    ast.exprs.deinit(ast.gpa);
-    ast.syms.deinit(ast.gpa);
+    if (ast.options.mode == .gpa) {
+        ast.exprs.deinit(ast.options.mode.gpa);
+        ast.syms.deinit(ast.options.mode.gpa);
+        ast.toks.deinit(ast.options.mode.gpa);
+    }
+}
+
+fn appendExpr(ast: *Ast, e: Expr) !void {
+    switch (ast.options.mode) {
+        .gpa => |gpa| try ast.exprs.append(gpa, e),
+        .measure => ast.exprs.items.len += 1,
+    }
 }
 
 pub fn createExpr(ast: *Ast, e: Expr) !Ast.Iterator {
     const id: Expr.Id = @enumFromInt(ast.exprs.items.len);
-    try ast.exprs.append(ast.gpa, e);
+    try ast.appendExpr(e);
     return .init(id, ast);
 }
 
 pub fn internStr(ast: *Ast, str: []const u8) !Expr.Id {
     const sym: Ast.Sym = @enumFromInt(ast.syms.count());
-    const gop = try ast.syms.getOrPut(ast.gpa, str);
-    if (gop.found_existing) return gop.value_ptr.*;
-    const e = try ast.createExpr(.{ .sym = sym });
-    gop.value_ptr.* = e.id;
-    return e.id;
+    switch (ast.options.mode) {
+        .gpa => {
+            const gop = try ast.syms.getOrPut(ast.options.mode.gpa, str);
+            if (gop.found_existing) return gop.value_ptr.*;
+            const e = try ast.createExpr(.{ .sym = sym });
+            gop.value_ptr.* = e.id;
+            return e.id;
+        },
+        .measure => {
+            ast.syms.entries.len += 1;
+            const e = try ast.createExpr(.{ .sym = sym });
+            return e.id;
+        },
+    }
 }
 
 pub fn expr(ast: *Ast, id: Expr.Id) *Expr {
@@ -197,7 +221,6 @@ pub const Iterator = struct {
         return ret;
     }
 
-    
     /// prepend e to lst.  returns new head.
     /// assumes lst is a cons.
     pub fn prepend(lst: Iterator, elem: Iterator) !Iterator {
@@ -219,6 +242,9 @@ pub const Iterator = struct {
     pub fn append(lst: Iterator, elem: Iterator) !Iterator {
         // [o|o] -- [o|/]
         //  1        2
+        if (lst.ast.options.mode == .measure) {
+            return try lst.ast.createExpr(.empty_lst);
+        }
 
         const ex = lst.expr();
         const c = ex.cons;
@@ -281,6 +307,8 @@ pub const Cons = struct {
         return c.fst == .nil;
     }
 };
+
+const empty = Ast{ .options = .{ .mode = .{ .gpa = t_gpa } }, .root_env = .nil, .root_lst = .nil };
 
 test Cons {
     _ = Cons;

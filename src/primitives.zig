@@ -88,15 +88,16 @@ const methods = struct {
         return .{ .id = iter.next().?.id, .rest = iter.id };
     }
 
+    const t_options: Ast.Options = .{ .mode = .{ .gpa = t_gpa } };
     test @"+" {
-        var ast = try Parser.parse("(+ 1 2)", t_gpa);
+        var ast = try Parser.parse("(+ 1 2)", t_options);
         defer ast.deinit();
         const x = try methods.eval(ast.root_lst.iterator(&ast), ast.root_env);
         try testing.expectEqual(3, x.id.iterator(&ast).as(.num));
     }
 
     test car {
-        var ast = try Parser.parse("(car (1 2))", t_gpa);
+        var ast = try Parser.parse("(car (1 2))", t_options);
         defer ast.deinit();
         const x = try methods.eval(ast.root_lst.iterator(&ast), ast.root_env);
         var iter = x.id.iterator(&ast);

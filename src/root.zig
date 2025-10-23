@@ -24,10 +24,11 @@ fn checkFile(path: []const u8, gpa: std.mem.Allocator) !void {
     const src1 = try arena.allocSentinel(u8, try f.getEndPos(), 0);
 
     std.debug.assert(src1.len == try fr.interface.readSliceShort(src1));
-    var ast1 = try Parser.parse(src1, arena);
+    const options: Ast.Options = .{ .mode = .{ .gpa = arena } };
+    var ast1 = try Parser.parse(src1, options);
     var iter1 = ast1.root_lst.iterator(&ast1);
     const src2 = try std.fmt.allocPrintSentinel(arena, "{f}", .{iter1}, 0);
-    var ast2 = try Parser.parse(src2, arena);
+    var ast2 = try Parser.parse(src2, options);
 
     var iter2 = ast2.root_lst.iterator(&ast2);
     while (iter1.next()) |it1| {

@@ -8,8 +8,10 @@ const Tokenizer = @import("Tokenizer.zig");
 const primitives = @import("primitives.zig");
 
 t: Tokenizer,
-stack: std.ArrayList(struct { Expr.Id, Tokenizer.Token }) = .{},
+stack: std.ArrayList(StackItem) = .{},
 ast: Ast,
+
+const StackItem = struct { Expr.Id, Tokenizer.Token };
 
 pub fn deinit(p: *Parser) void {
     p.exprs.deinit(p.gpa);
@@ -18,48 +20,67 @@ pub fn deinit(p: *Parser) void {
     p.root_env.deinit(p.gpa);
 }
 
-/// push 'e' to the cons at top of the stack.  then if e is a cons push on the stack.
+/// push 'e' to the cons at top of the stack.  then if e is a cons push to stack.
 pub fn pushExpr(p: *Parser, e: Ast.Iterator, tok: Tokenizer.Token) !void {
-    // std.debug.print("stack.len {}\n", .{p.stack.items.len});
-
-    const lastid, _ = p.stack.items[p.stack.items.len - 1];
-
-    // std.debug.print("pushExpr stack.len {} lastid {} {}\n", .{ p.stack.items.len, lastid, new.expr().* });
-
-    _ = try lastid.iterator(&p.ast).append(e);
-
-    if (e.expr().* == .cons) try p.stack.append(p.ast.gpa, .{ e.id, tok });
+    if (p.ast.options.mode == .gpa) {
+        // std.debug.print("stack.len {}\n", .{p.stack.items.len});
+        const lastid, _ = p.stack.items[p.stack.items.len - 1];
+        // std.debug.print("pushExpr stack.len {} lastid {} {}\n", .{ p.stack.items.len, lastid, new.expr().* });
+        _ = try lastid.iterator(&p.ast).append(e);
+        if (e.expr().* == .cons) try p.stack.append(p.ast.options.mode.gpa, .{ e.id, tok });
+    } else {
+        const lastid: Expr.Id = @enumFromInt(0);
+        _ = try lastid.iterator(&p.ast).append(e);
+        p.stack.items.len += 1;
+    }
 }
 
 pub const Error = std.mem.Allocator.Error || error{UnbalancedParens} || std.fmt.ParseFloatError;
 
-pub fn parse(src: [:0]const u8, gpa: std.mem.Allocator) Error!Ast {
+fn stackAppend(p: *Parser, item: StackItem) !void {
+    if (p.ast.options.mode == .gpa) {
+        try p.stack.append(p.ast.options.mode.gpa, item);
+    } else {
+        p.stack.items.len += 1;
+    }
+}
+fn tokAppend(p: *Parser, tok: Tokenizer.Token) !void {
+    if (p.ast.options.mode == .gpa) {
+        try p.ast.toks.append(p.ast.options.mode.gpa, tok);
+    } else {
+        p.ast.toks.items.len += 1;
+    }
+}
+
+pub fn parse(src: [:0]const u8, options: Ast.Options) Error!Ast {
     var p: Parser = .{
         .t = .{ .src = src },
-        .ast = .{ .gpa = gpa, .root_env = .nil, .root_lst = .nil },
+        .ast = .{ .options = options, .root_env = .nil, .root_lst = .nil },
     };
 
     p.ast.root_env = (try Ast.Env.init(&p.ast)).id;
     // std.debug.print("parse env {}\n", .{p.ast.getExpr(p.ast.root_env).env});
 
-    defer p.stack.deinit(gpa);
+    defer if (options.mode == .gpa) p.stack.deinit(options.mode.gpa);
     errdefer p.ast.deinit();
 
     const root = try p.ast.createExpr(.{ .cons = .empty });
-    try p.ast.toks.append(p.ast.gpa, .empty);
+    try p.tokAppend(.empty);
     p.ast.root_lst = root.id;
-    try p.stack.append(gpa, .{ root.id, .{ .start = 0, .end = 0, .tag = .lparen } });
+    try p.stackAppend(.{ root.id, .{ .start = 0, .end = 0, .tag = .lparen } });
     defer {
-        const expected = p.ast.root_lst.iterator(&p.ast).expr().cons.fst.iterator(&p.ast).count();
-        if (expected != p.ast.toks.items.len) {
-            std.debug.print("expected {} tokens.  found {}\n{f}\n", .{ expected, p.ast.toks.items.len, p.ast.dump(src) });
-            // unreachable;
+        if (options.mode == .gpa) {
+            const expected = p.ast.root_lst.iterator(&p.ast).expr().cons.fst.iterator(&p.ast).count();
+            if (expected != p.ast.toks.items.len) {
+                std.debug.print("expected {} tokens.  found {}\n{f}\n", .{ expected, p.ast.toks.items.len, p.ast.dump(src) });
+            }
         }
     }
 
     while (true) {
         const tok = p.t.next();
-        if (tok.tag != .rparen and tok.tag != .eof) try p.ast.toks.append(p.ast.gpa, tok);
+        if (tok.tag != .rparen and tok.tag != .eof) try p.tokAppend(tok);
+
         // std.debug.print("{t: <10} {: >4}:{: >4} {s}\n", .{ tok.tag, tok.start, tok.end, tok.src(src) });
         switch (tok.tag) {
             .eof => break,
@@ -68,8 +89,10 @@ pub fn parse(src: [:0]const u8, gpa: std.mem.Allocator) Error!Ast {
                 try p.pushExpr(x, tok);
             },
             .rparen => {
-                _, const stok = p.stack.pop() orelse return error.UnbalancedParens;
-                if (stok.tag != .lparen) return error.UnbalancedParens;
+                if (options.mode == .gpa) {
+                    _, const stok = p.stack.pop() orelse return error.UnbalancedParens;
+                    if (stok.tag != .lparen) return error.UnbalancedParens;
+                } else p.stack.items.len -= 1;
             },
             .string, .symbol => {
                 const sym = try p.ast.internStr(tok.src(src));
@@ -88,7 +111,7 @@ pub fn parse(src: [:0]const u8, gpa: std.mem.Allocator) Error!Ast {
         }
     }
 
-    if (p.stack.items.len != 1) return error.UnbalancedParens;
+    if (options.mode == .gpa and p.stack.items.len != 1) return error.UnbalancedParens;
 
     return p.ast;
 }
@@ -97,7 +120,7 @@ const testing = std.testing;
 const tgpa = testing.allocator;
 
 test Parser {
-    var ast = try Parser.parse("(+ 1 1)", tgpa);
+    var ast = try Parser.parse("(+ 1 1)", .{ .mode = .{ .gpa = tgpa } });
     defer ast.deinit();
 
     { // check env
@@ -117,4 +140,9 @@ test Parser {
     }
 
     try testing.expectFmt("(+ 1 1)", "{f}", .{ast.root_lst.iterator(&ast)});
+}
+
+test "comptime parse" {
+    var ast = try Parser.parse("(+ 1 1)", .{ .mode = .measure });
+    defer ast.deinit();
 }
