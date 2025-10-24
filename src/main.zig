@@ -29,9 +29,10 @@ pub fn main() !void {
     const end = w.writer.end;
     try w.writer.writeByte(0);
     const src = w.written()[0..end :0];
-    var ast = try deme.Parser.parse(src, gpa);
-    defer ast.deinit();
-    std.debug.print("{f}\n{f}\n{f}\n", .{ ast.root_env.iterator(&ast), ast.root_lst.iterator(&ast), ast.dump() });
+    var p = try deme.Parser.init(src, .{ .mode = .{ .gpa = gpa } });
+    var res = try p.parse();
+    defer res.ast.deinit();
+    std.debug.print("{f}\n{f}\n{f}\n", .{ res.ast.root_env.iterator(&res.ast), res.ast.root_lst.iterator(&res.ast), res.ast.dump(src) });
     anyline.using_history();
 
     var arena = std.heap.ArenaAllocator.init(gpa);

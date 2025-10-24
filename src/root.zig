@@ -13,7 +13,7 @@ test {
     _ = primitives;
 }
 
-// parse, format, parse check tokens equal
+// parse, format, parse round trip and check tokens are equal
 fn checkFile(path: []const u8, gpa: std.mem.Allocator) !void {
     var arena_ = std.heap.ArenaAllocator.init(gpa);
     defer arena_.deinit();
@@ -22,15 +22,17 @@ fn checkFile(path: []const u8, gpa: std.mem.Allocator) !void {
     defer f.close();
     var fr = f.reader(&.{});
     const src1 = try arena.allocSentinel(u8, try f.getEndPos(), 0);
-
     std.debug.assert(src1.len == try fr.interface.readSliceShort(src1));
-    const options: Ast.Options = .{ .mode = .{ .gpa = arena } };
-    var ast1 = try Parser.parse(src1, options);
-    var iter1 = ast1.root_lst.iterator(&ast1);
-    const src2 = try std.fmt.allocPrintSentinel(arena, "{f}", .{iter1}, 0);
-    var ast2 = try Parser.parse(src2, options);
 
-    var iter2 = ast2.root_lst.iterator(&ast2);
+    const options: Ast.Options = .{ .mode = .{ .gpa = arena } };
+    var p1 = try Parser.init(src1, options);
+    var res1 = try p1.parse();
+    var iter1 = res1.ast.root_lst.iterator(&res1.ast);
+    const src2 = try std.fmt.allocPrintSentinel(arena, "{f}", .{iter1}, 0);
+    var p2 = try Parser.init(src2, options);
+    var res2 = try p2.parse();
+
+    var iter2 = res2.ast.root_lst.iterator(&res2.ast);
     while (iter1.next()) |it1| {
         try std.testing.expectEqual(it1.id, iter2.next().?.id);
     }

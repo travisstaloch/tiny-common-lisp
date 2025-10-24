@@ -90,17 +90,19 @@ const methods = struct {
 
     const t_options: Ast.Options = .{ .mode = .{ .gpa = t_gpa } };
     test @"+" {
-        var ast = try Parser.parse("(+ 1 2)", t_options);
-        defer ast.deinit();
-        const x = try methods.eval(ast.root_lst.iterator(&ast), ast.root_env);
-        try testing.expectEqual(3, x.id.iterator(&ast).as(.num));
+        var p = try Parser.init("(+ 1 2)", t_options);
+        var res = try p.parse();
+        defer res.ast.deinit();
+        const x = try methods.eval(res.ast.root_lst.iterator(&res.ast), res.ast.root_env);
+        try testing.expectEqual(3, x.id.iterator(&res.ast).as(.num));
     }
 
     test car {
-        var ast = try Parser.parse("(car (1 2))", t_options);
-        defer ast.deinit();
-        const x = try methods.eval(ast.root_lst.iterator(&ast), ast.root_env);
-        var iter = x.id.iterator(&ast);
+        var p = try Parser.init("(car (1 2))", t_options);
+        var res = try p.parse();
+        defer res.ast.deinit();
+        const x = try methods.eval(res.ast.root_lst.iterator(&res.ast), res.ast.root_env);
+        var iter = x.id.iterator(&res.ast);
         try testing.expectEqual(1, iter.next().?.as(.num));
     }
 };

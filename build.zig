@@ -32,12 +32,13 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const mod_tests = b.addTest(.{ .root_module = mod });
+    const filters = if (b.option([]const u8, "test-filter", "")) |f| b.dupeStrings(&.{f}) else &.{};
+    const mod_tests = b.addTest(.{ .root_module = mod, .filters = filters });
     const run_mod_tests = b.addRunArtifact(mod_tests);
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
         // .use_llvm = true,
-        .filters = if (b.option([]const u8, "test-filter", "")) |f| b.dupeStrings(&.{f}) else &.{},
+        .filters = filters,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
     const test_step = b.step("test", "Run tests");
@@ -48,4 +49,5 @@ pub fn build(b: *std.Build) void {
     const check = b.step("check", "Check if foo compiles");
     check.dependOn(&exe_check.step);
     check.dependOn(&exe_tests.step);
+    check.dependOn(&mod_tests.step);
 }

@@ -12,21 +12,25 @@ pub const Options = struct {
     mode: union(enum) {
         gpa: std.mem.Allocator,
         measure,
+        bounded,
     },
 };
 
 options: Options,
 exprs: std.ArrayList(Expr) = .{},
-syms: std.StringArrayHashMapUnmanaged(Expr.Id) = .{},
-toks: std.ArrayList(Tokenizer.Token) = .{},
+syms: std.ArrayList(SymItem) = .{},
 root_env: Expr.Id,
 root_lst: Expr.Id,
 
+pub const SymItem = struct { []const u8, Expr.Id };
+
 pub fn deinit(ast: *Ast) void {
-    if (ast.options.mode == .gpa) {
-        ast.exprs.deinit(ast.options.mode.gpa);
-        ast.syms.deinit(ast.options.mode.gpa);
-        ast.toks.deinit(ast.options.mode.gpa);
+    switch (ast.options.mode) {
+        .gpa => |gpa| {
+            ast.exprs.deinit(gpa);
+            ast.syms.deinit(gpa);
+        },
+        .measure, .bounded => {},
     }
 }
 
@@ -34,6 +38,7 @@ fn appendExpr(ast: *Ast, e: Expr) !void {
     switch (ast.options.mode) {
         .gpa => |gpa| try ast.exprs.append(gpa, e),
         .measure => ast.exprs.items.len += 1,
+        .bounded => ast.exprs.appendAssumeCapacity(e),
     }
 }
 
@@ -44,18 +49,29 @@ pub fn createExpr(ast: *Ast, e: Expr) !Ast.Iterator {
 }
 
 pub fn internStr(ast: *Ast, str: []const u8) !Expr.Id {
-    const sym: Ast.Sym = @enumFromInt(ast.syms.count());
+    const sym: Ast.Sym = @enumFromInt(ast.syms.items.len);
     switch (ast.options.mode) {
-        .gpa => {
-            const gop = try ast.syms.getOrPut(ast.options.mode.gpa, str);
-            if (gop.found_existing) return gop.value_ptr.*;
+        .gpa => |gpa| {
+            // FIXME avoid linear scan here and in bounded below. use
+            // ArrayHashMap w/ adapted api? example https://github.com/ziglang/zig/issues/21917
+            for (ast.syms.items) |x| {
+                if (std.mem.eql(u8, str, x[0])) return x[1];
+            }
             const e = try ast.createExpr(.{ .sym = sym });
-            gop.value_ptr.* = e.id;
+            try ast.syms.append(gpa, .{ str, e.id });
             return e.id;
         },
         .measure => {
-            ast.syms.entries.len += 1;
+            ast.syms.items.len += 1;
             const e = try ast.createExpr(.{ .sym = sym });
+            return e.id;
+        },
+        .bounded => {
+            for (ast.syms.items) |x| {
+                if (std.mem.eql(u8, str, x[0])) return x[1];
+            }
+            const e = try ast.createExpr(.{ .sym = sym });
+            ast.syms.appendAssumeCapacity(.{ str, e.id });
             return e.id;
         },
     }
@@ -95,6 +111,7 @@ pub const Env = struct {
     scope_list: Expr.Id,
 
     pub fn init(ast: *Ast) !Ast.Iterator {
+        errdefer ast.deinit();
         const root_scope = try ast.createExpr(.{ .cons = .empty });
         const root_env = try ast.createExpr(.{ .env = .{ .parent = .nil, .scope_list = root_scope.id } });
         // std.debug.print("root_env {f}\n", .{root_env});
@@ -121,7 +138,6 @@ pub const Lam = struct {
     /// a list of symbols
     arg_lst: Ast.Expr.Id,
     env: Ast.Expr.Id,
-
     name: if (is_debug) Expr.Id else void,
     func: primitives.Func,
 };
@@ -130,7 +146,7 @@ pub const Sym = enum(usize) {
     _,
 
     pub fn str(s: Sym, ast: *Ast) []const u8 {
-        return ast.syms.keys()[@intFromEnum(s)];
+        return ast.syms.items[@intFromEnum(s)][0];
     }
 };
 
@@ -172,9 +188,9 @@ fn formatDump(d: DumpData, w: *std.Io.Writer) !void {
     for (d.ast.exprs.items, 0..) |e, i| {
         try w.print("{: >4} {}\n", .{ i, e });
     }
-    for (d.ast.toks.items, 0..) |t, i| {
-        try w.print("{: >4} '{s}'\n", .{ i, t.src(d.src) });
-    }
+    // for (d.ast.toks.items, 0..) |t, i| {
+    //     try w.print("{: >4} '{s}'\n", .{ i, t.src(d.src) });
+    // }
 }
 
 /// methods for Expr.Ids
@@ -290,7 +306,6 @@ pub const Iterator = struct {
             .lam => |x| {
                 try w.print("'{s}", .{x.name.iterator(i.ast).as(.sym).str(i.ast)});
             },
-
             // else => |x| std.debug.panic("TODO {t}", .{x}),
         }
         try w.flush();
