@@ -1,0 +1,21 @@
+// Project-local debug tasks
+//
+// For more documentation on how to configure debug tasks,
+// see: https://zed.dev/docs/debugger
+[
+  {
+    "adapter": "CodeLLDB",
+    "label": "First configuration",
+    "request": "launch",
+    // The program to debug. This field supports path resolution with ~ or . symbols.
+    "program": "zig-out/bin/tinylisp",
+    // cwd: defaults to the current working directory of your project ($ZED_WORKTREE_ROOT)
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "build": {
+      "command": "zig",
+      "args": ["build"]
+    },
+    // "args": ["tests/test1.lisp"]
+    "args": ["examples/basic.scm"]
+  }
+]
