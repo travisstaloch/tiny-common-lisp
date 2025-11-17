@@ -31,7 +31,7 @@ pub fn init(cell: []Expr, w: *Io.Writer) Interp {
     p.env = p.pair(p.tru, p.tru, nil);
     for (0..prims_len) |i| {
         const pr: Prim = @enumFromInt(i);
-        p.env = p.pair(p.atom(@tagName(pr)), box(.PRIM, @intCast(i)), p.env);
+        p.env = p.pair(p.atom(@tagName(pr)), box(.prim, @intCast(i)), p.env);
     }
     return p;
 }
@@ -39,35 +39,39 @@ pub fn init(cell: []Expr, w: *Io.Writer) Interp {
 pub const Expr = extern union {
     float: f64,
     int: u64,
-    val: packed struct(u64) { payload: u48, tag: Tag },
+    boxed: packed struct(u64) {
+        payload: u48,
+        tag: Tag,
+        /// tag == .cons and sign == 1 indicates top level list.  all other
+        /// boxed values have sign == 0.
+        sign: u1 = 0,
+    },
 
-    pub const Tag = enum(u16) {
-        ATOM = 0x7ff8, //      0b0111111111111_000
-        PRIM = 0x7ff9, //      0b0111111111111_001
-        CONS = 0x7ffa, //      0b0111111111111_010
-        CLOS = 0x7ffb, //      0b0111111111111_011
-        NIL = 0x7ffc, //       0b0111111111111_100
-        /// a top level list returned by parse()
-        ROOT_CONS = 0x7ffd, // 0b0111111111111_101
+    pub const Tag = enum(u15) {
+        atom = 0x7ff8, // 0b0111111111111_000
+        prim = 0x7ff9, // 0b0111111111111_001
+        cons = 0x7ffa, // 0b0111111111111_010
+        clos = 0x7ffb, // 0b0111111111111_011
+        nil = 0x7ffc, //  0b0111111111111_100
 
         pub fn int(t: Tag) u16 {
             return @intFromEnum(t);
         }
 
-        pub fn isOneOf(t: Tag, comptime tags: []const Tag) bool {
+        pub fn isOneOf(t: Tag, comptime tags: []const u16) bool {
             const V = @Vector(tags.len, u16);
             const wanted: V = @bitCast(tags[0..tags.len].*);
-            const actual: [tags.len]Tag = @splat(t);
-            return @reduce(.Or, wanted == @as(V, @bitCast(actual)));
+            const actual: [tags.len]u16 = @splat(@intFromEnum(t));
+            return @reduce(.Or, wanted == actual);
         }
     };
 
     pub fn ord(x: Expr) u48 {
-        return x.val.payload;
+        return x.boxed.payload;
     }
 
     pub fn not(x: Expr) bool {
-        return x.val.tag == .NIL;
+        return x.boxed.tag == .nil;
     }
 
     pub fn equ(x: Expr, y: Expr) bool {
@@ -79,20 +83,20 @@ pub const Expr = extern union {
         e: Expr,
 
         pub fn format(f: Fmt, w: *Io.Writer) !void {
-            switch (f.e.val.tag.int()) {
-                tagInt(.NIL) => try w.writeAll("()"),
-                tagInt(.ATOM) => try w.writeAll(f.p.atomName(f.e)),
-                tagInt(.PRIM) => try w.print("'{t}", .{@as(Prim, @enumFromInt(ord(f.e)))}),
-                tagInt(.CONS), tagInt(.ROOT_CONS) => |tag| {
+            switch (f.e.boxed.tag.int()) {
+                NIL_ => try w.writeAll("()"),
+                ATOM => try w.writeAll(f.p.atomName(f.e)),
+                PRIM => try w.print("'{t}", .{@as(Prim, @enumFromInt(ord(f.e)))}),
+                CONS => {
                     var t = f.e;
-                    const is_root = @intFromBool(tag != tagInt(.ROOT_CONS));
+                    const is_root = 1 - f.e.boxed.sign; // sign set to 1 for top level list
                     try w.writeAll("("[0..is_root]);
                     while (true) {
                         try w.print("{f}", .{f.p.car(t).fmt(f.p)});
                         t = f.p.cdr(t);
-                        switch (t.val.tag) {
-                            .NIL => break,
-                            .CONS => {},
+                        switch (t.boxed.tag.int()) {
+                            NIL_ => break,
+                            CONS => {},
                             else => {
                                 try w.print(" . {f}", .{t.fmt(f.p)});
                                 break;
@@ -102,7 +106,7 @@ pub const Expr = extern union {
                     }
                     try w.writeAll(")"[0..is_root]);
                 },
-                tagInt(.CLOS) => try w.print("<{d}>", .{f.e.ord()}),
+                CLOS => try w.print("<{d}>", .{f.e.ord()}),
                 else => try w.print("{d}", .{f.e.float}),
             }
         }
@@ -118,16 +122,20 @@ pub const Expr = extern union {
     }
 };
 
-const tagInt = Expr.Tag.int;
+const ATOM = Expr.Tag.atom.int();
+const PRIM = Expr.Tag.prim.int();
+const CONS = Expr.Tag.cons.int();
+const CLOS = Expr.Tag.clos.int();
+const NIL_ = Expr.Tag.nil.int();
 
-pub const nil = box(.NIL, 0);
+pub const nil = box(.nil, 0);
 
 pub fn heap(i: *Interp) [*:0]u8 {
     return @ptrCast(i.memory);
 }
 
 pub fn box(t: Expr.Tag, payload: u48) Expr {
-    return .{ .val = .{ .tag = t, .payload = payload } };
+    return .{ .boxed = .{ .tag = t, .payload = payload } };
 }
 
 pub fn abort(p: *Interp, comptime fmt: []const u8, args: anytype) noreturn {
@@ -142,22 +150,32 @@ pub fn checkStack(p: *Interp) void {
     }
 }
 
+fn strcmp(a: [*:0]const u8, b: []const u8) bool {
+    return std.mem.eql(u8, a[0..b.len], b) and a[b.len] == 0;
+}
+
 pub fn atom(p: *Interp, s: []const u8) Expr {
     var i: u32 = 0;
-    while (i < p.hp and !std.mem.eql(u8, p.heap()[i..][0..s.len], s)) {
-        i += @intCast(std.mem.len(p.heap() + i) + 1);
+    while (i < p.hp) {
+        if (strcmp(p.heap()[i..], s)) {
+            return box(.atom, i);
+        }
+        const len = std.mem.len(p.heap() + i);
+        assert(p.heap()[i + len] == 0);
+        i += @intCast(len + 1);
     }
     if (i == p.hp) {
         @memcpy(p.heap() + i, s);
+        p.heap()[i + s.len] = 0;
         p.hp += @intCast(s.len + 1);
         p.checkStack();
     }
-    return box(.ATOM, i);
+    return box(.atom, i);
 }
 
 pub fn atomName(p: *Interp, x: Expr) []const u8 {
-    assert(x.val.tag == .ATOM);
-    return std.mem.sliceTo(p.heap()[@intCast(x.ord())..], 0);
+    assert(x.boxed.tag == .atom);
+    return std.mem.sliceTo(p.heap()[x.ord()..], 0);
 }
 
 pub fn cons(p: *Interp, x: Expr, y: Expr) Expr {
@@ -166,16 +184,24 @@ pub fn cons(p: *Interp, x: Expr, y: Expr) Expr {
     p.sp -= 1;
     p.memory[p.sp] = y;
     p.checkStack();
-    return box(.CONS, p.sp);
+    return box(.cons, p.sp);
 }
 
 pub fn pair(p: *Interp, v: Expr, x: Expr, e: Expr) Expr {
     return p.cons(p.cons(v, x), e);
 }
 
+/// parse src and then progn loop over result printing intermediates
 pub fn run(p: *Interp, src: [:0]const u8, file_path: []const u8) !Expr {
-    const parsed_expr = try p.parse(src, file_path);
-    return p.eval(parsed_expr, p.env);
+    var t = try p.parse(src, file_path);
+    var result = nil;
+    while (t.boxed.tag == .cons) {
+        result = p.eval(p.car(t), p.env);
+        try p.w.print("{: >4}> {f}\n", .{ p.sp - p.hp / 8, result.fmt(p) });
+        t = p.cdr(t);
+    }
+    try p.w.flush();
+    return result;
 }
 
 pub const Error = error{Parse} ||
@@ -192,8 +218,8 @@ pub fn parse(l: *Interp, src: [:0]const u8, file_path: []const u8) Error!Expr {
     };
 
     var ret = try l.parseList(&t, .eof);
-    assert(ret.val.tag == .CONS);
-    ret.val.tag = .ROOT_CONS; // mark as top level list
+    assert(ret.boxed.tag == .cons);
+    ret.boxed.sign = 1; // sign=1 means top level list
     return ret;
 }
 
@@ -219,6 +245,7 @@ fn parseExprInner(p: *Interp, t: *Tokenizer, token: Tokenizer.Token) Error!Expr 
             const quoted = try p.parseExprInner(t, t.next());
             return p.cons(p.atom("quote"), p.cons(quoted, nil));
         },
+        .rparen => return error.Parse,
         else => |tag| std.debug.panic("TODO handle {t}", .{tag}),
     };
 }
@@ -228,6 +255,12 @@ fn parseList(l: *Interp, t: *Tokenizer, comptime end_tag: Tokenizer.Token.Tag) E
     // trace("parseList() called {f}", .{token.fmt(t)});
     switch (token.tag) {
         end_tag => return nil,
+        .dot => {
+            const last_expr = try l.parseExprInner(t, t.next());
+            const right_paren = t.next();
+            if (right_paren.tag != .rparen) return error.Parse;
+            return last_expr;
+        },
         else => {
             // std.debug.panic("TODO handle {t}", .{tag}),
             const first = try l.parseExprInner(t, token);
@@ -239,8 +272,8 @@ fn parseList(l: *Interp, t: *Tokenizer, comptime end_tag: Tokenizer.Token.Tag) E
 
 fn dumpErr(p: *Interp) Expr {
     // p.printEnv(p.env) catch {};
-    p.printStack() catch {};
-    p.printHeap() catch {};
+    // p.printStack() catch {};
+    // p.printHeap() catch {};
     return p.err;
 }
 
@@ -248,85 +281,107 @@ pub fn gc(p: *Interp) void {
     p.sp = @intCast(p.env.ord());
 }
 
-fn car(p: *Interp, e: Expr) Expr {
-    return if (e.val.tag.isOneOf(&.{ .CONS, .ROOT_CONS, .CLOS }))
-        p.memory[e.ord() + 1]
+fn car(p: *Interp, x: Expr) Expr {
+    return if (x.boxed.tag.isOneOf(&.{ CONS, CLOS }))
+        p.memory[x.ord() + 1]
     else
         p.dumpErr();
 }
 
-fn cdr(p: *Interp, e: Expr) Expr {
-    return if (e.val.tag.isOneOf(&.{ .CONS, .ROOT_CONS, .CLOS }))
-        p.memory[e.ord()]
+fn cdr(p: *Interp, x: Expr) Expr {
+    return if (x.boxed.tag.isOneOf(&.{ CONS, CLOS }))
+        p.memory[x.ord()]
     else
         p.dumpErr();
 }
 
 /// construct a closure, returns a boxed CLOS
-fn closure(l: *Interp, vars: Expr, body: Expr, env: Expr) Expr {
-    return box(.CLOS, (l.pair(vars, body, if (env.equ(l.env)) nil else env).ord()));
+fn closure(p: *Interp, vars: Expr, body: Expr, env: Expr) Expr {
+    const pr = p.pair(vars, body, if (env.equ(p.env)) nil else env);
+    return box(.clos, pr.ord());
 }
 
-fn assoc(p: *Interp, v: Expr, _e: Expr) Expr {
-    var e = _e;
-    while (e.val.tag.isOneOf(&.{ .CONS, .ROOT_CONS }) and !v.equ(p.car(p.car(e))))
+/// look up a symbol in an environment, return its value or ERR if not found
+fn assoc(p: *Interp, a: Expr, env: Expr) Expr {
+    var e = env;
+    while (e.boxed.tag == .cons and !a.equ(p.car(p.car(e)))) {
         e = p.cdr(e);
-    return if (e.val.tag.isOneOf(&.{ .CONS, .ROOT_CONS })) p.cdr(p.car(e)) else p.dumpErr();
+    }
+    return if (e.boxed.tag == .cons) p.cdr(p.car(e)) else p.dumpErr();
 }
 
 fn let(p: *Interp, x: Expr) bool {
     return !x.not() and !p.cdr(x).not();
 }
 
-fn bind(p: *Interp, v: Expr, t: Expr, e: Expr) Expr {
-    return if (v.not()) e else if (v.val.tag.isOneOf(&.{ .CONS, .ROOT_CONS }))
-        p.bind(p.cdr(v), p.cdr(t), p.pair(p.car(v), p.car(t), e))
-    else
-        p.pair(v, t, e);
+// create environment by extending `env` with variables `vars` bound to values `vals` */
+fn bind(p: *Interp, vars: Expr, vals: Expr, env: Expr) Expr {
+    return switch (vars.boxed.tag.int()) {
+        NIL_ => env,
+        CONS => p.bind(
+            p.cdr(vars),
+            p.cdr(vals),
+            p.pair(p.car(vars), p.car(vals), env),
+        ),
+        else => p.pair(vars, vals, env),
+    };
 }
 
 fn evlis(p: *Interp, t: Expr, e: Expr) Expr {
-    return switch (t.val.tag) {
-        .CONS, .ROOT_CONS => p.cons(p.eval(p.car(t), e), p.evlis(p.cdr(t), e)),
-        .ATOM => p.assoc(t, e),
+    return switch (t.boxed.tag.int()) {
+        CONS => p.cons(p.eval(p.car(t), e), p.evlis(p.cdr(t), e)),
+        ATOM => p.assoc(t, e),
         else => nil,
     };
 }
-fn reduce(p: *Interp, f: Expr, t: Expr, e: Expr) Expr {
-    return p.eval(
-        p.cdr(p.car(f)),
-        p.bind(p.car(p.car(f)), p.evlis(t, e), if (p.cdr(f).not()) p.env else p.cdr(f)),
-    );
+
+/// apply closure `clos` to arguments `args` in environment `env`
+pub fn reduce(l: *Interp, clos: Expr, args: Expr, env: Expr) Expr {
+    const clos_fun = l.car(clos);
+    const clos_env = l.cdr(clos);
+    const clos_vars = l.car(clos_fun);
+    const clos_body = l.cdr(clos_fun);
+    const eval_args = l.evlis(args, env);
+    return l.eval(clos_body, l.bind(
+        clos_vars,
+        eval_args,
+        if (clos_env.not()) l.env else clos_env,
+    ));
 }
 
 fn callPrim(pm: Prim, p: *Interp, t: Expr, env: Expr) Error!Expr {
+    // trace("callPrim({t}, {f})", .{ pm, t.fmt(p) });
     return switch (pm) {
-        inline else => |tag| @field(prim, @tagName(tag))(p, t, env),
+        inline else => |tag| @field(primitives, @tagName(tag))(p, t, env),
     };
 }
 
-fn apply(p: *Interp, f: Expr, t: Expr, e: Expr) Expr {
-    return switch (f.val.tag) {
-        .PRIM => blk: {
+fn apply(p: *Interp, f: Expr, t: Expr, env: Expr) Expr {
+    trace("apply({f}, {f})", .{ f.fmt(p), t.fmt(p) });
+    return switch (f.boxed.tag.int()) {
+        PRIM => blk: {
             const pm: Prim = @enumFromInt(f.ord());
-            break :blk callPrim(pm, p, t, e) catch
+            break :blk callPrim(pm, p, t, env) catch
                 p.abort("error in primitive '{t}'", .{pm});
         },
-        .CLOS => p.reduce(f, t, e),
+        CLOS => p.reduce(f, t, env),
         else => p.dumpErr(),
     };
 }
 
-fn eval(p: *Interp, x: Expr, e: Expr) Expr {
-    return switch (x.val.tag) {
-        .ATOM => p.assoc(x, e),
-        .CONS, .ROOT_CONS => p.apply(p.eval(p.car(x), e), p.cdr(x), e),
+fn eval(p: *Interp, x: Expr, env: Expr) Expr {
+    trace("eval({f})", .{x.fmt(p)});
+    return switch (x.boxed.tag.int()) {
+        ATOM => p.assoc(x, env),
+        CONS => blk: {
+            const xx = p.eval(p.car(x), env);
+            break :blk p.apply(xx, p.cdr(x), env);
+        },
         else => x,
     };
 }
 
 fn printHeap(l: *Interp) !void {
-    // TODO: use this value to generate the main fmt string used in this function
     const max_symbol_len = 20;
 
     try l.w.writeAll(
@@ -381,17 +436,14 @@ fn printStack(p: *Interp) !void {
         try p.w.print("| {:>5} |", .{sp});
         sp -= 1;
         const x = p.memory[sp];
-        // zig fmt: off
-        switch (x.val.tag.int()) {
-            tagInt(.NIL)  => try p.w.print("  NIL   |   {:>5}  |  {s}\n", .{ x.ord(), "()" }),
-            tagInt(.ATOM) => try p.w.print("  ATOM  |  0x{X:0>4}  |  {s}\n", .{ x.ord(), p.atomName(x) }),
-            tagInt(.PRIM) => try p.w.print("  PRIM  |   {:>5}  |  '{t}\n", .{ x.ord(), @as(Prim, @enumFromInt(x.ord())) }),
-            tagInt(.CONS), tagInt(.ROOT_CONS),
-                          => try p.w.print("  CONS  |   {:>5}  |\n", .{x.ord()}),
-            tagInt(.CLOS) => try p.w.print("  CLOS  |   {:>5}  |\n", .{x.ord()}),
-            else          => try p.w.print("        |          |  {d}\n", .{x.float}),
+        switch (x.boxed.tag.int()) {
+            NIL_ => try p.w.print("  NIL   |   {:>5}  |  {s}\n", .{ x.ord(), "()" }),
+            ATOM => try p.w.print("  ATOM  |  0x{X:0>4}  |  {s}\n", .{ x.ord(), p.atomName(x) }),
+            PRIM => try p.w.print("  PRIM  |   {:>5}  |  '{t}\n", .{ x.ord(), @as(Prim, @enumFromInt(x.ord())) }),
+            CONS => try p.w.print("  CONS  |   {:>5}  |\n", .{x.ord()}),
+            CLOS => try p.w.print("  CLOS  |   {:>5}  |\n", .{x.ord()}),
+            else => try p.w.print("        |          |  {d}\n", .{x.float}),
         }
-        // zig fmt: on
     }
     try p.w.writeAll(
         \\|             ...              |
@@ -435,6 +487,7 @@ pub const Tokenizer = struct {
             number,
             string,
             quote,
+            dot,
         };
 
         pub const Fmt = struct {
@@ -523,6 +576,7 @@ pub const Tokenizer = struct {
             .rparen,
             .invalid,
             .quote,
+            .dot,
             // .quasi_quote,
             // .quasi_unquote,
             // .quasi_unquote_splicing,
@@ -546,6 +600,7 @@ pub const Tokenizer = struct {
                             '(' => _ = self.advanceTo(.lparen, 1, &t),
                             ')' => _ = self.advanceTo(.rparen, 1, &t),
                             '\'' => _ = self.advanceTo(.quote, 1, &t),
+                            '.' => _ = self.advanceTo(.dot, 1, &t),
                             ';' => continue :state self.advanceTo(.comment, 1, &t),
                             '0'...'9' => continue :state self.advanceTo(.number, 1, &t),
                             '"' => continue :state self.advanceTo(.string, 1, &t),
@@ -623,10 +678,14 @@ pub const Tokenizer = struct {
     }
 };
 
-pub const Prim = std.meta.DeclEnum(prim);
+pub fn fromBool(p: *Interp, b: bool) Expr {
+    return if (b) p.tru else nil;
+}
+
+pub const Prim = std.meta.DeclEnum(primitives);
 pub const prims_len = @typeInfo(Prim).@"enum".fields.len;
 
-const prim = struct {
+const primitives = struct {
     /// (eval x) return evaluated x (such as when x was quoted)
     pub fn eval(p: *Interp, t: Expr, env: Expr) Error!Expr {
         return p.eval(p.car(p.evlis(t, env)), env);
@@ -684,19 +743,18 @@ const prim = struct {
     pub fn int(p: *Interp, t: Expr, env: Expr) Error!Expr {
         const n = p.car(p.evlis(t, env));
         // TODO return n<1e16 && n>-1e16 ? (long long)n : n;
-        var ret: Expr = .{ .int = 0 };
-        ret.val.payload = @intFromFloat(n.float);
-        return ret;
+
+        return .{ .float = @floatFromInt(@as(u128, @intFromFloat(n.float))) };
     }
     fn cmpOp(p: *Interp, t: Expr, env: Expr, comptime cmp: enum { lt, gt, eq }) Error!Expr {
         const t1 = p.evlis(t, env);
         const x = p.car(t1);
         const y = p.car(p.cdr(t1));
-        return if (switch (cmp) {
+        return p.fromBool(switch (cmp) {
             .lt => x.float - y.float < 0,
             .gt => x.float - y.float > 0,
             .eq => x.equ(y),
-        }) p.tru else nil;
+        });
     }
     /// (< n1 n2) #t if n1<n2, otherwise ()
     pub fn @"<"(p: *Interp, t: Expr, env: Expr) Error!Expr {
@@ -742,7 +800,10 @@ const prim = struct {
     }
     /// (define v x) define a named value globally
     pub fn define(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        p.env = p.pair(p.car(t), p.eval(p.car(p.cdr(t)), env), p.env);
+        const t1 = p.cdr(t);
+        const x = p.car(t1);
+        const t2 = p.eval(x, env);
+        p.env = p.pair(p.car(t), t2, p.env);
         return p.car(t);
     }
     pub fn cond(p: *Interp, t0: Expr, env: Expr) Error!Expr {
@@ -754,7 +815,7 @@ const prim = struct {
     }
     /// (not x) #t if x is (), otherwise ()
     pub fn not(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        return if (p.car(p.evlis(t, env)).not()) p.tru else nil;
+        return p.fromBool(p.car(p.evlis(t, env)).not());
     }
     /// (lambda v x) construct a closure
     pub fn lambda(p: *Interp, t: Expr, env: Expr) Error!Expr {
@@ -764,21 +825,25 @@ const prim = struct {
         var t = t0;
         var e = env;
         while (p.let(t)) : (t = p.cdr(t)) {
-            e = p.pair(p.car(p.car(t)), p.eval(p.car(p.cdr(p.car(t))), e), e);
+            e = p.pair(
+                p.car(p.car(t)),
+                p.eval(p.car(p.cdr(p.car(t))), e),
+                e,
+            );
         }
         return p.eval(p.car(t), e);
     }
     pub fn @"pair?"(p: *Interp, t: Expr, env: Expr) Error!Expr {
         const x = p.car(p.evlis(t, env));
-        return if (x.val.tag.isOneOf(&.{ .CONS, .ROOT_CONS })) p.tru else nil;
+        return p.fromBool(x.boxed.tag == .cons);
     }
     /// (progn (x1 x2 ...)) evaluates each x$i, returning the last one
-    pub fn progn(l: *Interp, t: Expr, env: Expr) Expr {
+    pub fn progn(p: *Interp, t: Expr, env: Expr) Expr {
         var result = nil;
         var current = t;
-        while (current.val.tag.isOneOf(&.{ .CONS, .ROOT_CONS })) {
-            result = l.eval(l.car(current), env);
-            current = l.cdr(current);
+        while (current.boxed.tag == .cons) {
+            result = p.eval(p.car(current), env);
+            current = p.cdr(current);
         }
         return result;
     }
@@ -798,7 +863,7 @@ const prim = struct {
     pub fn echo(p: *Interp, t: Expr, env: Expr) Error!Expr {
         const t1 = p.car(p.evlis(t, env));
         try p.w.print("    >> {f}\n", .{t1.fmt(p)});
-        return p.eval(t1, env);
+        return t1;
     }
     pub fn @"echo-eval"(p: *Interp, t: Expr, env: Expr) Error!Expr {
         const t1 = p.car(p.evlis(t, env));
@@ -812,7 +877,7 @@ fn trace(comptime fmt: []const u8, args: anytype) void {
     if (false)
         log.debug(fmt, args);
 
-    if (false)
+    if (@import("build-options").trace)
         std.debug.print(fmt ++ "\n", args);
 }
 
@@ -826,19 +891,19 @@ const t_gpa = testing.allocator;
 
 fn expectExprEqual(expected: Expr.Fmt, actual: Expr.Fmt) !void {
     // trace("{f}\n{f}\n", .{ expected, actual });
-    try testing.expectEqual(expected.e.val.tag, actual.e.val.tag);
+    try testing.expectEqual(expected.e.boxed.tag, actual.e.boxed.tag);
 
     const ep = expected.p;
     const ap = actual.p;
-    switch (expected.e.val.tag.int()) {
-        tagInt(.ATOM) => {
+    switch (expected.e.boxed.tag.int()) {
+        ATOM => {
             if (expected.e.equ(expected.p.err)) return error.ErrExpr;
             try testing.expectEqualStrings(
                 ep.atomName(expected.e),
                 ap.atomName(actual.e),
             );
         },
-        tagInt(.CONS), tagInt(.ROOT_CONS) => {
+        CONS => {
             try expectExprEqual(
                 ep.car(expected.e).fmt(ep),
                 ap.car(actual.e).fmt(ap),
@@ -857,7 +922,7 @@ const TestCase = union(enum) {
     src: []const u8,
 };
 
-fn runTestCase(c: TestCase) !void {
+fn testParseFmt(c: TestCase) !void {
     var discarding = std.Io.Writer.Discarding.init(&.{});
     const N = 4096 * 4;
     var memory: [N]Expr = undefined;
@@ -884,9 +949,8 @@ fn runTestCase(c: TestCase) !void {
 }
 
 test "parse fmt rountrip" {
-    try runTestCase(.{ .file_path = "examples/basic.scm" });
-    try runTestCase(.{ .file_path = "examples/fizzbuzz.scm" });
-    try runTestCase(.{ .file_path = "examples/quicklisp.lisp" });
-    try runTestCase(.{ .file_path = "examples/test.lisp" });
-    try runTestCase(.{ .file_path = "tests/test1.lisp" });
+    try testParseFmt(.{ .file_path = "examples/basic.scm" });
+    try testParseFmt(.{ .file_path = "examples/fizzbuzz.scm" });
+    try testParseFmt(.{ .file_path = "examples/sqrt.lisp" });
+    try testParseFmt(.{ .file_path = "tests/dotcall.lisp" });
 }
