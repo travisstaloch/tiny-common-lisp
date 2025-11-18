@@ -7,7 +7,7 @@
     ((Y (lambda (f)
             (lambda (x)
                 (let*
-                    (y (- x (/ (- x (/ n x)) 2)))
+                    ((y (- x (/ (- x (/ n x)) 2))))
                     (if (eq? x y)
                         x
                         (f y))))))
