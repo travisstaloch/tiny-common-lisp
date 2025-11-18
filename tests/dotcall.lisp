@@ -45,8 +45,8 @@
 (cons
     (if (equal?
             (let*
-                (x 1) (y (+ 1 x))
-                (let* (z (+ x y)) z))
+                ((x 1) (y (+ 1 x)))
+                (let* ((z (+ x y))) z))
             3)
         'passed
         'failed)
@@ -55,8 +55,8 @@
 (cons
     (if (equal?
             (let*
-                (x 2)
-                ((let* (f +) (x 1) (lambda (y) (f x y))) x))
+                ((x 2))
+                ((let* ((f +) (x 1)) (lambda (y) (f x y))) x))
             3)
         'passed
         'failed)
