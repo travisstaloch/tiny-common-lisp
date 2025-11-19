@@ -13,6 +13,8 @@ const flags = [_]flagset.Flag{
         .desc = "file path of script to run",
         .kind = .list,
     }),
+    .init([]const u8, "eval", .{ .short = 'e', .desc = "text to eval", .kind = .list }),
+    .init([]const u8, "load", .{ .short = 'l', .desc = "file to load", .kind = .list }),
 };
 
 pub fn main() !void {
@@ -56,8 +58,16 @@ pub fn main() !void {
     try stdout.flush();
 
     var memory: [1024 * 16]TinyLisp.Expr = undefined;
-    var p: TinyLisp = .init(&memory, stdout);
+    var p: TinyLisp = .init(&memory, stdout, .quiet);
 
+    if (args.parsed.eval.items.len > 0) {
+        for (args.parsed.eval.items) |eval| {
+            try run(gpa, &p, "<eval>", .{ .eval = eval });
+        }
+    }
+    if (args.parsed.load.items.len > 0) {
+        unreachable;
+    }
     if (args.parsed.script.items.len > 0) {
         for (args.parsed.script.items) |script| {
             const input_f = std.fs.cwd().openFile(script, .{}) catch |e| {
@@ -65,26 +75,29 @@ pub fn main() !void {
                 break;
             };
             defer input_f.close();
-            try run(gpa, &p, input_f, script, .script);
+            try run(gpa, &p, script, .{ .script = input_f });
         }
     } else {
-        try run(gpa, &p, std.fs.File.stdin(), "<stdin>", .repl);
+        try run(gpa, &p, "<stdin>", .{ .repl = std.fs.File.stdin() });
     }
 }
 
 fn run(
     gpa: std.mem.Allocator,
     p: *TinyLisp,
-    input_f: std.fs.File,
     name: []const u8,
-    mode: enum { script, repl },
+    mode: union(enum) {
+        script: std.fs.File,
+        repl: std.fs.File,
+        eval: []const u8,
+    },
 ) !void {
     var wa: std.Io.Writer.Allocating = .init(gpa);
-
     var input_buf: [4096]u8 = undefined;
 
     switch (mode) {
-        .repl => while (true) {
+        .repl => |input_f| while (true) {
+            p.print_mode = .repl;
             try p.w.print("{: >4}> ", .{p.sp - p.hp / 8});
             try p.w.flush();
             wa.clearRetainingCapacity();
@@ -99,16 +112,20 @@ fn run(
             if (src.len <= 1) break;
 
             _ = try p.run(src, name);
-            p.gc();
+            p.gcOld();
         },
-        .script => {
+        .script => |input_f| {
             var input = input_f.reader(&input_buf);
             _ = try input.interface.stream(&wa.writer, .unlimited);
             try wa.writer.writeByte(0);
             const src = wa.written()[0 .. wa.written().len - 1 :0];
             _ = try p.run(src, name);
-            // try p.w.print("\n{: >4}> {f}\n", .{ p.sp - p.hp / 8, e.fmt(p) });
-            // try p.w.flush();
+        },
+        .eval => |to_eval| {
+            try wa.writer.writeAll(to_eval);
+            try wa.writer.writeByte(0);
+            const src = wa.written()[0 .. wa.written().len - 1 :0];
+            _ = try p.run(src, name);
         },
     }
 }

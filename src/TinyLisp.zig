@@ -12,10 +12,15 @@ memory: []Expr,
 tru: Expr,
 env: Expr,
 w: *Io.Writer,
-user_error: ?anyerror = null,
-prims: primitives = .{},
+print_mode: PrintMode,
 
-pub fn init(cell: []Expr, w: *Io.Writer) Interp {
+const PrintMode = enum {
+    quiet,
+    /// print loop intermediate results
+    repl,
+};
+
+pub fn init(cell: []Expr, w: *Io.Writer, print_mode: PrintMode) Interp {
     var p: Interp = .{
         .memory = cell,
         .hp = 0,
@@ -23,18 +28,16 @@ pub fn init(cell: []Expr, w: *Io.Writer) Interp {
         .tru = undefined,
         .env = undefined,
         .w = w,
+        .print_mode = print_mode,
     };
-    @memset(p.memory, .{ .int = 0 });
+    @memset(p.memory, .empty);
 
-    p.tru = p.atom("#t");
+    p.tru = p.atom("t");
     p.env = p.pair(p.tru, p.tru, nil);
     for (0..prims_len) |i| {
         const pr: Prim = @enumFromInt(i);
         p.env = p.pair(p.atom(@tagName(pr)), box(.prim, @intCast(i)), p.env);
     }
-    _ = p.run(@embedFile("common.lisp"), "common.lisp") catch |e| {
-        p.abort("error.{t}.  failed to run common.lisp", .{e});
-    };
     return p;
 }
 
@@ -49,13 +52,15 @@ pub const Expr = extern union {
         sign: u1 = 0,
     },
 
+    pub const empty: Expr = .{ .int = 0 };
+
     pub const Tag = enum(u15) {
         atom = 0x7ff8, // 0b0111111111111_000
         prim = 0x7ff9, // 0b0111111111111_001
         cons = 0x7ffa, // 0b0111111111111_010
         clos = 0x7ffb, // 0b0111111111111_011
-        nil = 0x7ffc, //  0b0111111111111_100
-        err = 0x7ffd, //  0b0111111111111_101
+        macr = 0x7ffc, //  0b0111111111111_100
+        nil = 0x7ffd, //  0b0111111111111_101
 
         pub fn int(t: Tag) u16 {
             return @intFromEnum(t);
@@ -79,6 +84,13 @@ pub const Expr = extern union {
 
     pub fn equ(x: Expr, y: Expr) bool {
         return x.int == y.int;
+    }
+
+    pub fn tagName(x: Expr) []const u8 {
+        return switch (x.boxed.tag.int()) {
+            ATOM, PRIM, CONS, CLOS, MACR, NIL_ => @tagName(x.boxed.tag),
+            else => "num",
+        };
     }
 
     pub const Fmt = struct {
@@ -111,9 +123,7 @@ pub const Expr = extern union {
                 CONS => {
                     var t = f.e;
                     const is_root = 1 - f.e.boxed.sign; // sign set to 1 for top level list
-                    const is_quote = f.p.carAssume(t).boxed.tag == .atom and
-                        std.mem.eql(u8, "quote", f.p.atomName(f.p.carAssume(t)));
-                    if (is_quote) {
+                    if (f.p.isQuote(t)) {
                         try w.writeByte('\'');
                         t = f.p.cdrAssume(t);
                         try formatList(f, w, &t);
@@ -123,8 +133,8 @@ pub const Expr = extern union {
                         try w.writeAll(")"[0..is_root]);
                     }
                 },
-                CLOS => try w.print("<{d}>", .{f.e.ord()}),
-                ERR_ => try w.print("error.{d}", .{f.e.ord()}),
+                CLOS => try w.print("{{{d}}}", .{f.e.ord()}),
+                MACR => try w.print("[{d}]", .{f.e.ord()}),
                 else => try w.print("{d}", .{f.e.float}),
             }
         }
@@ -144,8 +154,8 @@ const ATOM = Expr.Tag.atom.int();
 const PRIM = Expr.Tag.prim.int();
 const CONS = Expr.Tag.cons.int();
 const CLOS = Expr.Tag.clos.int();
+const MACR = Expr.Tag.macr.int();
 const NIL_ = Expr.Tag.nil.int();
-const ERR_ = Expr.Tag.err.int();
 
 pub const nil = box(.nil, 0);
 
@@ -157,8 +167,7 @@ pub fn box(t: Expr.Tag, payload: u48) Expr {
     return .{ .boxed = .{ .tag = t, .payload = payload } };
 }
 
-pub fn abort(p: *Interp, comptime fmt: []const u8, args: anytype) noreturn {
-    _ = p; // autofix
+pub fn abort(_: *Interp, comptime fmt: []const u8, args: anytype) noreturn {
     std.debug.print(fmt, args);
     std.process.exit(1);
 }
@@ -210,16 +219,22 @@ pub fn pair(p: *Interp, v: Expr, x: Expr, e: Expr) Expr {
     return p.cons(p.cons(v, x), e);
 }
 
-/// parse src and then progn loop over result printing intermediates
+pub fn isQuote(p: *Interp, t: Expr) bool {
+    return p.carAssume(t).boxed.tag == .atom and
+        std.mem.eql(u8, "quote", p.atomName(p.carAssume(t)));
+}
+
+/// parse src and then loop evaluating intermediates
 pub fn run(p: *Interp, src: [:0]const u8, file_path: []const u8) Error!Expr {
     var t = try p.parse(src, file_path);
     var result = nil;
     while (t.boxed.tag == .cons) {
         result = try p.eval(try p.car(t), p.env);
-        try p.w.print("{f}\n", .{result.fmt(p)});
+        if (p.print_mode == .repl)
+            try p.w.print("{f}\n", .{result.fmt(p)});
         t = try p.cdr(t);
     }
-    try p.w.flush();
+    if (p.print_mode == .repl) try p.w.flush();
     return result;
 }
 
@@ -228,7 +243,8 @@ pub const Error = error{ Parse, NonPair, Unbound, CannotApply, User } ||
     Io.Writer.Error ||
     std.fmt.ParseFloatError ||
     std.fs.File.OpenError ||
-    std.fs.File.ReadError;
+    std.fs.File.ReadError ||
+    std.mem.Allocator.Error;
 
 pub fn parse(l: *Interp, src: [:0]const u8, file_path: []const u8) Error!Expr {
     // trace("parse() called", .{});
@@ -246,7 +262,7 @@ pub fn parse(l: *Interp, src: [:0]const u8, file_path: []const u8) Error!Expr {
 
 fn parseExpr(p: *Interp, t: *Tokenizer, token: Tokenizer.Token) Error!Expr {
     return p.parseExprInner(t, token) catch |e|
-        p.err(e, "\"{f}\".\n", .{t});
+        p.err(e, "{f}", .{token.fmt(t)});
 }
 fn parseExprInner(p: *Interp, t: *Tokenizer, token: Tokenizer.Token) Error!Expr {
     // trace("parseExpr({f})", .{token.fmt(t)});
@@ -254,7 +270,10 @@ fn parseExprInner(p: *Interp, t: *Tokenizer, token: Tokenizer.Token) Error!Expr 
 
     return switch (token.tag) {
         .lparen => try p.parseList(t, .rparen),
-        .symbol, .string => p.atom(src),
+        .symbol, .string => if (std.mem.eql(u8, src, "nil"))
+            nil
+        else
+            p.atom(src),
         .number => .{ .float = try std.fmt.parseFloat(f64, src) },
         .eof => nil,
         .quote => {
@@ -266,22 +285,22 @@ fn parseExprInner(p: *Interp, t: *Tokenizer, token: Tokenizer.Token) Error!Expr 
     };
 }
 
-fn parseList(l: *Interp, t: *Tokenizer, comptime end_tag: Tokenizer.Token.Tag) Error!Expr {
+fn parseList(p: *Interp, t: *Tokenizer, comptime end_tag: Tokenizer.Token.Tag) Error!Expr {
     const token = t.next();
     // trace("parseList() called {f}", .{token.fmt(t)});
     switch (token.tag) {
         end_tag => return nil,
         .dot => {
-            const last_expr = try l.parseExprInner(t, t.next());
+            const last_expr = try p.parseExprInner(t, t.next());
             const right_paren = t.next();
             if (right_paren.tag != .rparen) return error.Parse;
             return last_expr;
         },
         else => {
             // std.debug.panic("TODO handle {t}", .{tag}),
-            const first = try l.parseExprInner(t, token);
-            const rest = try l.parseList(t, end_tag);
-            return l.cons(first, rest);
+            const first = try p.parseExprInner(t, token);
+            const rest = try p.parseList(t, end_tag);
+            return p.cons(first, rest);
         },
     }
 }
@@ -292,41 +311,48 @@ pub fn err(p: *Interp, e: Error, comptime fmt: []const u8, args: anytype) Error 
     return e;
 }
 
-pub fn gc(p: *Interp) void {
+pub fn gcOld(p: *Interp) void {
     p.sp = @intCast(p.env.ord());
 }
 
-fn car(p: *Interp, x: Expr) Error!Expr {
-    return if (x.boxed.tag.isOneOf(&.{ CONS, CLOS }))
-        p.memory[x.ord() + 1]
-    else
-        p.err(error.NonPair, "{f}", .{x.fmt(p)});
+pub fn gc(p: *Interp, x: Expr) Expr {
+    _ = p;
+    // TODO implement
+    return x;
 }
 
-// TODO replace car with carAssume whenever CONS/CLOS is known
+pub fn rc(p: *Interp, x: *Expr, y: Expr) Expr {
+    _ = p;
+    _ = x;
+    // TODO implement
+    return y;
+}
+
+fn carOpt(p: *Interp, x: Expr) ?Expr {
+    return if (x.boxed.tag.isOneOf(&.{ CONS, CLOS, MACR }))
+        p.memory[x.ord() + 1]
+    else
+        null;
+}
+
+fn car(p: *Interp, x: Expr) Error!Expr {
+    return p.carOpt(x) orelse p.err(error.NonPair, "{f}", .{x.fmt(p)});
+}
+
+// TODO replace car with carAssume whenever CONS/CLOS/MACR is known
 fn carAssume(p: *Interp, x: Expr) Expr {
     return p.car(x) catch unreachable;
 }
 
-fn carOpt(p: *Interp, x: Expr) ?Expr {
-    return if (x.boxed.tag.isOneOf(&.{ CONS, CLOS }))
-        p.memory[x.ord() + 1]
+fn cdrOpt(p: *Interp, x: Expr) ?Expr {
+    return if (x.boxed.tag.isOneOf(&.{ CONS, CLOS, MACR }))
+        p.memory[x.ord()]
     else
         null;
 }
 
 fn cdr(p: *Interp, x: Expr) Error!Expr {
-    return if (x.boxed.tag.isOneOf(&.{ CONS, CLOS }))
-        p.memory[x.ord()]
-    else
-        p.err(error.NonPair, "{f}", .{x.fmt(p)});
-}
-
-fn cdrOpt(p: *Interp, x: Expr) ?Expr {
-    return if (x.boxed.tag.isOneOf(&.{ CONS, CLOS }))
-        p.memory[x.ord()]
-    else
-        null;
+    return p.cdrOpt(x) orelse p.err(error.NonPair, "{f}", .{x.fmt(p)});
 }
 
 fn cdrAssume(p: *Interp, x: Expr) Expr {
@@ -337,6 +363,10 @@ fn cdrAssume(p: *Interp, x: Expr) Expr {
 fn closure(p: *Interp, vars: Expr, body: Expr, env: Expr) Error!Expr {
     const pr = p.pair(vars, body, if (env.equ(p.env)) nil else env);
     return box(.clos, pr.ord());
+}
+
+fn macro(p: *Interp, v: Expr, x: Expr) Error!Expr {
+    return box(.macr, p.cons(v, x).ord());
 }
 
 /// look up a symbol in an environment, return its value or ERR if not found
@@ -351,8 +381,8 @@ fn assoc(p: *Interp, a: Expr, env: Expr) Error!Expr {
         p.err(error.Unbound, "{f}", .{a.fmt(p)});
 }
 
-fn let(p: *Interp, x: Expr) Error!bool {
-    return !x.not() and !(try p.cdr(x)).not();
+fn let(p: *Interp, x: Expr) bool {
+    return !x.not() and !(if (p.cdrOpt(x)) |y| y.not() else true);
 }
 
 // create environment by extending `env` with variables `vars` bound to values `vals` */
@@ -406,11 +436,129 @@ fn apply(p: *Interp, f: Expr, t: Expr, env: Expr) Error!Expr {
     return switch (f.boxed.tag.int()) {
         PRIM => try callPrim(@enumFromInt(f.ord()), p, t, env),
         CLOS => try p.reduce(f, t, env),
-        else => p.err(error.CannotApply, "{f}", .{f.fmt(p)}),
+        MACR => unreachable,
+        else =>
+        // |i| if (i == CONS and p.isQuote(f))
+        //     try p.apply(try p.assoc(p.carAssume(p.cdrAssume(f)), env), t, env)
+        // else
+        p.err(error.CannotApply, "{s} {f}", .{ f.tagName(), f.fmt(p) }),
     };
 }
 
-fn eval(p: *Interp, x: Expr, env: Expr) Error!Expr {
+fn dup(_: *Interp, x: Expr) Expr {
+    // TODO implement
+    return x;
+}
+
+fn evarg(p: *Interp, t: *Expr, e: *Expr, a: *bool) Error!Expr {
+    if (t.boxed.tag.int() == ATOM) {
+        t.* = try p.assoc(t.*, e.*);
+        a.* = true;
+    }
+    const x = try p.car(t.*);
+    t.* = try p.cdr(t.*);
+    return if (a.*) p.dup(x) else p.eval(x, e.*);
+}
+
+fn eval(p: *Interp, x_init: Expr, _env: Expr) Error!Expr {
+    trace("eval {f}", .{x_init.fmt(p)});
+    var x = x_init;
+    var y = x;
+    var e = _env;
+    var d = nil;
+    var f = nil;
+    var g = nil;
+    var h = nil;
+    while (true) {
+        trace("eval {s}: {f}", .{ x.tagName(), x.fmt(p) });
+        // copy x to y to output y => x when tracing is enabled
+        y = x;
+        // if x is an atom, then return its value; if x is not an application
+        // list (it is constant), then return x
+        if (x.boxed.tag.int() == ATOM) {
+            x = p.dup(try p.assoc(x, e));
+            break;
+        }
+        if (x.boxed.tag.int() != CONS) {
+            x = p.dup(x);
+            break;
+        }
+        // save g = old f to garbage collect, evaluate f in the application (f . x) and get the list of arguments x
+        g = f;
+        f = try p.eval(try p.car(x), e);
+        x = try p.cdr(x);
+        if (f.boxed.tag.int() == PRIM) {
+            // apply Lisp primitive to argument list x, return value in x
+            // x = prim[ord(f)].f(x,&e);
+            const pm: Prim = @enumFromInt(f.ord());
+            // try p.w.print("pm {t}\n", .{pm});
+            x = try callPrim(pm, p, x, e);
+            // garbage collect g = old f, garbage collect old macro body h
+            // gc(g);
+            g = nil;
+            //gc(h);
+            h = nil;
+            // if tail-call then continue evaluating x, otherwise return x
+            if (isPrimTailCall(pm)) continue;
+            break;
+        }
+        if (f.boxed.tag.int() == MACR) {
+            // bind macro f variables v to the given arguments literally (i.e. without evaluating the arguments)
+            d = p.dup(p.env);
+            var v = try p.car(f);
+            while (v.boxed.tag.int() == CONS) {
+                d = p.pair(try p.car(v), p.dup(try p.car(x)), d);
+                v = try p.cdr(v);
+                x = try p.cdr(x);
+            }
+            if (v.boxed.tag.int() == ATOM) d = p.pair(v, p.dup(x), d);
+            // expand macro f, then continue evaluating the expanded x
+            x = try p.eval(try p.cdr(f), d);
+            // garbage collect bindings d, gabage collect g = old f and old macro body h, save macro body h = x to gc later
+            // gc(d);
+            d = nil; // gc(g);
+            g = nil; // gc(h);
+            h = x;
+            continue;
+        }
+        if (f.boxed.tag.int() != CLOS)
+            return p.err(error.OutOfMemory, "{s} {f}", .{ f.tagName(), f.fmt(p) });
+        // get the list of variables v of closure f and its local environment d (use global env when nil)
+        var v = try p.car(try p.car(f));
+        d = p.dup(try p.cdr(f));
+        if (d.boxed.tag.int() == NIL_) d = p.dup(p.env);
+        // bind closure f variables v to the evaluated argument values
+        var a = false;
+        while (v.boxed.tag.int() == CONS) {
+            d = p.pair(p.carAssume(v), try p.evarg(&x, &e, &a), d);
+            v = p.cdrAssume(v);
+        }
+        if (v.boxed.tag.int() == ATOM)
+            d = p.pair(v, if (a) p.dup(x) else try p.evlis(x, e), d);
+        // next, evaluate body x of closure f in environment e = d while keeping f in memory as long as x
+        x = try p.cdr(try p.car(f));
+        // discard copy of the old environment e to use new environment d
+        // gc(e);
+        e = d;
+        d = nil;
+        // garbage collect closure g = old f with old body x, garbage collect old macro body h
+        // gc(g);
+        g = nil;
+        // gc(h);
+        h = nil;
+        // if (tr) trace(y, x, e);
+        trace("eval {f} => {f}", .{ y.fmt(p), x.fmt(p) });
+    }
+    trace("eval {f} => {f}", .{ y.fmt(p), x.fmt(p) });
+
+    // garbage collect environment e, closure f, macro body h
+    // gc(e); gc(f); gc(h);
+    // deregister 5 variables, if registered, without gc'ing them
+    // rr(5);
+    return x;
+}
+
+fn eval2(p: *Interp, x: Expr, env: Expr) Error!Expr {
     trace("eval({f})", .{x.fmt(p)});
     return switch (x.boxed.tag.int()) {
         ATOM => try p.assoc(x, env),
@@ -419,6 +567,24 @@ fn eval(p: *Interp, x: Expr, env: Expr) Error!Expr {
             try p.cdr(x),
             env,
         ),
+        MACR => {
+            // bind macro f variables v to the given arguments literally (i.e.
+            // without evaluating the arguments)
+            var d = env;
+            const f = try p.eval(try p.car(x), env);
+            var v = try p.car(f);
+            var xx = try p.cdr(x);
+            while (v.boxed.tag.int() == CONS) {
+                d = p.pair(try p.car(v), try p.car(xx), d);
+                v = try p.cdr(v);
+                xx = try p.cdr(xx);
+            }
+            if (v.boxed.tag.int() == ATOM) {
+                d = p.pair(v, xx, d);
+            }
+            // expand macro f, then continue evaluating the expanded x
+            return try p.eval(try p.cdr(f), d);
+        },
         else => x,
     };
 }
@@ -641,12 +807,25 @@ pub fn fromBool(p: *Interp, b: bool) Expr {
 pub const Prim = std.meta.DeclEnum(primitives);
 pub const prims_len = @typeInfo(Prim).@"enum".fields.len;
 
+fn isPrimTailCall(p: Prim) bool {
+    return switch (p) {
+        .cond,
+        .@"if",
+        .@"let*",
+        // .let,
+        // .@"letrec*",
+        // .letrec,
+        => true,
+        else => false,
+    };
+}
+
 // TODO maybe accept `p: *primitives` instead of *Interp and do
 // @fieldParentPtr mixins
 const primitives = struct {
     /// (eval x) return evaluated x (such as when x was quoted)
-    pub fn eval(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        return try p.eval(try p.car(try p.evlis(t, env)), env);
+    pub fn eval(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        return try p.eval(try p.car(try p.evlis(t, e)), e);
     }
     /// (quote x) special form, returns x unevaluated "as is"
     pub fn quote(p: *Interp, t: Expr, _: Expr) Error!Expr {
@@ -665,6 +844,15 @@ const primitives = struct {
     pub fn cdr(p: *Interp, t: Expr, env: Expr) Error!Expr {
         return try p.cdr(try p.car(try p.evlis(t, env)));
     }
+    // (list x1 x2 ... xk)
+    // returns the list of `x1`, `x2`, ..., `xk`.  That is, `(x1 x2 ... xk)` with all `x` evaluated.
+    pub fn list(_: *Interp, t: Expr, _: Expr) Error!Expr {
+        return t;
+    }
+    pub fn apply(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        return try p.apply(p.carAssume(t), try p.car(p.cdrAssume(t)), e);
+    }
+
     const Op = enum { add, sub, mul, div };
     fn mathOp(p: *Interp, t: Expr, env: Expr, comptime op: Op) Error!Expr {
         var t1 = try p.evlis(t, env);
@@ -697,12 +885,13 @@ const primitives = struct {
     pub fn @"/"(p: *Interp, t: Expr, env: Expr) Error!Expr {
         return mathOp(p, t, env, .div);
     }
-    /// (int n) integer part of n
-    pub fn int(p: *Interp, t: Expr, env: Expr) Error!Expr {
+    /// (truncate n) integer part of n, round toward 0
+    pub fn truncate(p: *Interp, t: Expr, env: Expr) Error!Expr {
         const n = try p.car(try p.evlis(t, env));
-        return .{ .float = @floatFromInt(@as(u128, @intFromFloat(n.float))) };
+        // @floatFromInt(@as(u128, @intFromFloat(n.float)))
+        return .{ .float = @trunc(n.float) };
     }
-    fn cmpOp(p: *Interp, t: Expr, env: Expr, comptime cmp: enum { lt, gt, eq }) Error!Expr {
+    fn cmpOp(p: *Interp, t: Expr, env: Expr, comptime cmp: enum { lt, gt, eq, le, ge }) Error!Expr {
         const t1 = try p.evlis(t, env);
         const x = try p.car(t1);
         const y = try p.car(try p.cdr(t1));
@@ -710,24 +899,34 @@ const primitives = struct {
             .lt => x.float - y.float < 0,
             .gt => x.float - y.float > 0,
             .eq => x.equ(y),
+            .le => x.float - y.float <= 0,
+            .ge => x.float - y.float >= 0,
         });
     }
-    /// (< n1 n2) #t if n1<n2, otherwise ()
+    /// (< n1 n2) t if n1<n2, otherwise ()
     pub fn @"<"(p: *Interp, t: Expr, env: Expr) Error!Expr {
         return cmpOp(p, t, env, .lt);
     }
-    /// (> n1 n2) #t if n1>n2, otherwise ()
+    /// (> n1 n2) t if n1>n2, otherwise ()
     pub fn @">"(p: *Interp, t: Expr, env: Expr) Error!Expr {
         return cmpOp(p, t, env, .gt);
     }
-    /// (= n1 n2) #t if n1=n2, otherwise ()
+    /// (= n1 n2) t if n1=n2, otherwise ()
     pub fn @"eq?"(p: *Interp, t: Expr, env: Expr) Error!Expr {
         return cmpOp(p, t, env, .eq);
     }
     pub const @"=" = @"eq?";
+    /// (<= n1 n2) t if n1<=n2, otherwise ()
+    pub fn @"<="(p: *Interp, t: Expr, env: Expr) Error!Expr {
+        return cmpOp(p, t, env, .le);
+    }
+    /// (>= n1 n2) t if n1>=n2, otherwise ()
+    pub fn @">="(p: *Interp, t: Expr, env: Expr) Error!Expr {
+        return cmpOp(p, t, env, .ge);
+    }
     /// (or x1 x2 ... xk) first x that is truthy, otherwise ()
     pub fn @"or"(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        var x = nil;
+        var x = Interp.nil;
         var t1 = t;
         while (true) {
             if (t1.not()) break;
@@ -739,7 +938,7 @@ const primitives = struct {
     }
     /// (and x1 x2 ... xk) last x if all x are truthy, otherwise ()
     pub fn @"and"(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        var x = nil;
+        var x = Interp.nil;
         var t1 = t;
         while (true) {
             if (t1.not()) break;
@@ -749,28 +948,37 @@ const primitives = struct {
         }
         return x;
     }
-    /// (if x y z) if x is non-() then y else z
-    pub fn @"if"(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        const cnd = try p.eval(try p.car(t), env);
+    /// (if x y z) if x then y else z
+    pub fn @"if"(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        const cnd = p.gc(try p.eval(try p.car(t), e));
         const branch = if (cnd.not()) try p.cdr(t) else t;
-        return try p.eval(try p.car(try p.cdr(branch)), env);
+        return try p.car(try p.cdr(branch));
     }
-    /// (define v x) define a named value globally
-    pub fn define(p: *Interp, t: Expr, env: Expr) Error!Expr {
+    /// (defvar v x) define a named value globally
+    pub fn defvar(p: *Interp, t: Expr, env: Expr) Error!Expr {
         const t1 = try p.cdr(t);
         const x = try p.car(t1);
         const t2 = try p.eval(x, env);
+        // trace("fst {f} t1 {f} x {f} t2 {f}", .{ (try p.car(t)).fmt(p), t1.fmt(p), x.fmt(p), t2.fmt(p) });
         p.env = p.pair(try p.car(t), t2, p.env);
         return try p.car(t);
+    }
+    // (defun name params body) define a named function globally
+    pub fn defun(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        const name = try p.car(t);
+        const params = try p.car(try p.cdr(t));
+        const body = try p.car(try p.cdr(try p.cdr(t)));
+        p.env = p.pair(name, try p.closure(params, body, e), p.env);
+        return name;
     }
     pub fn cond(p: *Interp, t0: Expr, env: Expr) Error!Expr {
         var t = t0;
         while ((try p.eval(try p.car(try p.car(t)), env)).not()) {
             t = try p.cdr(t);
         }
-        return try p.eval(try p.car(try p.cdr(try p.car(t))), env);
+        return try p.car(try p.cdr(try p.car(t)));
     }
-    /// (not x) #t if x is (), otherwise ()
+    /// (not x) t if x is (), otherwise ()
     pub fn not(p: *Interp, t: Expr, env: Expr) Error!Expr {
         return p.fromBool((try p.car(try p.evlis(t, env))).not());
     }
@@ -778,13 +986,13 @@ const primitives = struct {
     pub fn lambda(p: *Interp, t: Expr, env: Expr) Error!Expr {
         return p.closure(try p.car(t), try p.car(try p.cdr(t)), env);
     }
-    /// (let* ((v1 x1) (v2 x2) ... (vk xk)) y1 ... yn)
-    /// eval `y`s with `v`s in env
+    /// (let* ((k1 v1) (k2 v2) ... (kk vk)) y1 ... yn)
+    /// eval `y`s with `kv`s in env
     pub fn @"let*"(p: *Interp, t0: Expr, env: Expr) Error!Expr {
         var kvs = try p.car(t0);
         var kv = try p.car(kvs);
         var e = env;
-        while (try p.let(kv)) {
+        while (p.let(kv)) {
             e = p.pair(
                 try p.car(kv),
                 try p.eval(try p.car(try p.cdr(kv)), e),
@@ -794,13 +1002,13 @@ const primitives = struct {
             kv = p.carOpt(kvs) orelse break;
         }
 
-        var body = p.cdrOpt(t0) orelse return nil;
-        var t = p.carOpt(body) orelse return nil;
-        while (true) {
-            const ret = try p.eval(t, e);
-            body = p.cdrOpt(body) orelse return ret;
-            t = p.carOpt(body) orelse return ret;
+        var current = p.cdrOpt(t0) orelse return Interp.nil;
+        var result = Interp.nil;
+        while (current.boxed.tag.int() == CONS) {
+            result = try p.eval(p.carAssume(current), e);
+            current = p.cdrAssume(current);
         }
+        return result;
     }
     pub fn @"pair?"(p: *Interp, t: Expr, env: Expr) Error!Expr {
         const x = try p.car(try p.evlis(t, env));
@@ -808,7 +1016,7 @@ const primitives = struct {
     }
     /// (progn (x1 x2 ...)) evaluates each x$i, returning the last one
     pub fn progn(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        var result = nil;
+        var result = Interp.nil;
         var current = t;
         while (current.boxed.tag == .cons) {
             result = try p.eval(try p.car(current), env);
@@ -816,14 +1024,10 @@ const primitives = struct {
         }
         return result;
     }
-    pub fn echo(p: *Interp, t: Expr, env: Expr) Error!Expr {
+    pub fn print(p: *Interp, t: Expr, env: Expr) Error!Expr {
         const t1 = try p.car(try p.evlis(t, env));
-        try p.w.print("    >> {f}\n", .{t1.fmt(p)});
-        return t1;
-    }
-    pub fn @"echo-eval"(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        const t1 = try p.car(try p.evlis(t, env));
-        try p.w.print("    >> {f}\n    << {f}\n", .{ t.fmt(p), t1.fmt(p) });
+        try p.w.print("{f}\n", .{t1.fmt(p)});
+        try p.w.flush();
         return t1;
     }
     pub fn load(p: *Interp, t: Expr, _: Expr) Error!Expr {
@@ -841,21 +1045,24 @@ const primitives = struct {
         mem[len] = 0;
         return try p.run(mem[0..len :0], name);
     }
-    pub fn throw(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        const i = (try int(p, t, env)).float;
-        try p.w.print("user error code {}\n", .{i});
-        return .{ .boxed = .{ .tag = .err, .payload = @intFromFloat(i) } };
+    pub fn macro(p: *Interp, t: Expr, _: Expr) Error!Expr {
+        // L f_macro(L t,L *_) { return macro(dup(car(t)),dup(car(cdr(t)))); }
+        return p.macro(try p.car(t), try p.car(try p.cdr(t)));
     }
-    pub fn @"catch"(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        trace("catch {f}", .{t.fmt(p)});
-        const ret = try p.eval(try p.car(t), env);
-        return switch (ret.boxed.tag.int()) {
-            ERR_ => {
-                p.user_error = @errorFromInt(@as(u16, @intCast(ret.boxed.payload)));
-                return error.User;
-            },
-            else => ret,
-        };
+
+    test @"let*" {
+        try testEval("3",
+            \\(let* ((x 1) (y 2)) (let* ((z (+ x y))) z))
+        );
+    }
+    test load {
+        try testEval("begin", "(load src/common.lisp)");
+    }
+    test list {
+        try testEval("(1 2)", "(list 1 2)");
+    }
+    test "macro" {
+        try testEval("4", "(defun double (x) (+ x x)) (double 2)");
     }
 };
 
@@ -882,7 +1089,6 @@ fn expectExprEqual(expected: Expr.Fmt, actual: Expr.Fmt) !void {
     const ep = expected.p;
     const ap = actual.p;
     switch (expected.e.boxed.tag.int()) {
-        ERR_ => return error.ErrExpr,
         ATOM => try testing.expectEqualStrings(
             ep.atomName(expected.e),
             ap.atomName(actual.e),
@@ -910,7 +1116,7 @@ fn testParseFmt(c: TestCase) !void {
     var discarding = std.Io.Writer.Discarding.init(&.{});
     const N = 4096 * 4;
     var memory: [N]Expr = undefined;
-    var l: Interp = .init(&memory, &discarding.writer);
+    var l: Interp = .init(&memory, &discarding.writer, .quiet);
     const src = switch (c) {
         .file_path => try std.fs.cwd().readFileAllocOptions(t_gpa, c.file_path, 100000, null, .of(u8), 0),
         .src => try t_gpa.dupeZ(u8, c.src),
@@ -927,7 +1133,7 @@ fn testParseFmt(c: TestCase) !void {
     // trace("{s}", .{src2});
     defer t_gpa.free(src2);
     var memory2: [N]Expr = undefined;
-    var l2: Interp = .init(&memory2, &discarding.writer);
+    var l2: Interp = .init(&memory2, &discarding.writer, .quiet);
     const e2 = try l2.parse(src2, file_path);
     try expectExprEqual(e.fmt(&l), e2.fmt(&l2));
 }
@@ -943,16 +1149,14 @@ fn testEval(expected: []const u8, src: [:0]const u8) !void {
     var discarding = std.Io.Writer.Discarding.init(&.{});
     const N = 4096 * 4;
     var memory: [N]Expr = undefined;
-    var l: Interp = .init(&memory, &discarding.writer);
+    var l: Interp = .init(&memory, &discarding.writer, .quiet);
     const e = try l.run(src, "<testEval>");
     try testing.expectFmt(expected, "{f}", .{e.fmt(&l)});
 }
 
-test "let*" {
-    try testEval("3",
-        \\(let* ((x 1) (y 2)) (let* ((z (+ x y))) z))
-    );
+test {
+    _ = primitives;
 }
-test "load" {
-    try testEval("begin", "(load src/common.lisp)");
+test "nil sym" {
+    try testEval("()", "nil");
 }
