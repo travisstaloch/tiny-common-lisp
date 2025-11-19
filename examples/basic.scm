@@ -1,2 +1,6 @@
-(define x 1)
-(echo x)
+; (defvar x 1)
+; (print x)
+; (defun fun (x) x)
+; (print (fun 2))
+; (print '(1 2 3))
+(print (apply '+ '(1 2 3)))

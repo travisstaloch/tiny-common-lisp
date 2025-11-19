@@ -1,28 +1,25 @@
 ; fizzbuzz
-(define mod (lambda (i n)
-  (- i (* n (int (/ i n))))))
+(defun mymod (i n)
+  (- i (* n (truncate (/ i n)))))
 
-(cons (if (and
-  (= 1 (mod 19 3))
-  (= 2 (mod 20 3))
-  (= 0 (mod 21 3))
-  ) 'passed 'failed) '(mod))
+(print (cons (if (and
+  (= 1 (mymod 19 3))
+  (= 2 (mymod 20 3))
+  (= 0 (mymod 21 3))
+  ) 'passed 'failed) '(mymod)))
 
-(define fizzbuzz
-  (lambda (i n)
+(defun fizzbuzz (i n)
     (if (<= i n)
-      (let* ((x (mod i 3)) (y (mod i 5)))
-        ; (echo x y i n)
+      (let* ((x (mymod i 3)) (y (mymod i 5)))
+        ; (print (list i n x y))
         (if (or (= x 0) (= y 0))
           (if (and (= x 0) (= y 0))
-            (echo 'FizzBuzz)
+            (print 'FizzBuzz)
             (if (= x 0)
-              (echo 'Fizz)
-              (echo 'Buzz)))
-          (echo i))
+              (print 'Fizz)
+              (print 'Buzz)))
+          (print i))
         (fizzbuzz (+ i 1) n))
-    #f)
+    nil)
   )
-)
-
 (fizzbuzz 1 20)
