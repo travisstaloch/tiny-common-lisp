@@ -72,6 +72,10 @@ pub const Expr = extern union {
             const actual: [tags.len]u16 = @splat(@intFromEnum(t));
             return @reduce(.Or, wanted == actual);
         }
+
+        pub fn pair(a: Tag, b: Tag) u32 {
+            return @bitCast([2]u16{ a.int(), b.int() });
+        }
     };
 
     pub fn ord(x: Expr) u48 {
@@ -86,10 +90,24 @@ pub const Expr = extern union {
         return x.int == y.int;
     }
 
+    pub fn equStructural(a: Expr, b: Expr, p: *Interp) bool {
+        return switch (a.boxed.tag.pair(b.boxed.tag)) {
+            Expr.Tag.pair(.atom, .atom) => std.mem.eql(u8, p.atomName(a), p.atomName(b)),
+            Expr.Tag.pair(.nil, .nil) => true,
+            Expr.Tag.pair(.cons, .cons) => p.carAssume(a).equStructural(p.carAssume(b), p) and
+                p.cdrAssume(a).equStructural(p.cdrAssume(b), p),
+            else => a.int == b.int,
+        };
+    }
+
     pub fn tagName(x: Expr) []const u8 {
+        return if (x.isTagged()) @tagName(x.boxed.tag) else "num";
+    }
+
+    pub fn isTagged(x: Expr) bool {
         return switch (x.boxed.tag.int()) {
-            ATOM, PRIM, CONS, CLOS, MACR, NIL_ => @tagName(x.boxed.tag),
-            else => "num",
+            ATOM, PRIM, CONS, CLOS, MACR, NIL_ => true,
+            else => false,
         };
     }
 
@@ -119,7 +137,7 @@ pub const Expr = extern union {
             switch (f.e.boxed.tag.int()) {
                 NIL_ => try w.writeAll("()"),
                 ATOM => try w.writeAll(f.p.atomName(f.e)),
-                PRIM => try w.print("'{t}", .{@as(Prim, @enumFromInt(ord(f.e)))}),
+                PRIM => try w.print("<{t}>", .{@as(Prim, @enumFromInt(ord(f.e)))}),
                 CONS => {
                     var t = f.e;
                     const is_root = 1 - f.e.boxed.sign; // sign set to 1 for top level list
@@ -341,7 +359,7 @@ fn car(p: *Interp, x: Expr) Error!Expr {
 
 // TODO replace car with carAssume whenever CONS/CLOS/MACR is known
 fn carAssume(p: *Interp, x: Expr) Expr {
-    return p.car(x) catch unreachable;
+    return p.carOpt(x).?;
 }
 
 fn cdrOpt(p: *Interp, x: Expr) ?Expr {
@@ -356,12 +374,12 @@ fn cdr(p: *Interp, x: Expr) Error!Expr {
 }
 
 fn cdrAssume(p: *Interp, x: Expr) Expr {
-    return p.cdr(x) catch unreachable;
+    return p.cdrOpt(x).?;
 }
 
 /// construct a closure, returns a boxed CLOS
-fn closure(p: *Interp, vars: Expr, body: Expr, env: Expr) Error!Expr {
-    const pr = p.pair(vars, body, if (env.equ(p.env)) nil else env);
+fn closure(p: *Interp, vars: Expr, body: Expr, e: Expr) Error!Expr {
+    const pr = p.pair(vars, body, if (e.equ(p.env)) nil else e);
     return box(.clos, pr.ord());
 }
 
@@ -370,12 +388,12 @@ fn macro(p: *Interp, v: Expr, x: Expr) Error!Expr {
 }
 
 /// look up a symbol in an environment, return its value or ERR if not found
-fn assoc(p: *Interp, a: Expr, env: Expr) Error!Expr {
-    var e = env;
-    while (e.boxed.tag == .cons and !a.equ(try p.car(try p.car(e)))) {
+fn assoc(p: *Interp, a: Expr, e0: Expr) Error!Expr {
+    var e = e0;
+    while (e.boxed.tag.int() == CONS and !a.equ(try p.car(try p.car(e)))) {
         e = try p.cdr(e);
     }
-    return if (e.boxed.tag == .cons)
+    return if (e.boxed.tag.int() == CONS)
         try p.cdr(try p.car(e))
     else
         p.err(error.Unbound, "{f}", .{a.fmt(p)});
@@ -386,15 +404,15 @@ fn let(p: *Interp, x: Expr) bool {
 }
 
 // create environment by extending `env` with variables `vars` bound to values `vals` */
-fn bind(p: *Interp, vars: Expr, vals: Expr, env: Expr) Error!Expr {
+fn bind(p: *Interp, vars: Expr, vals: Expr, e: Expr) Error!Expr {
     return switch (vars.boxed.tag.int()) {
-        NIL_ => env,
+        NIL_ => e,
         CONS => p.bind(
             try p.cdr(vars),
             try p.cdr(vals),
-            p.pair(try p.car(vars), try p.car(vals), env),
+            p.pair(try p.car(vars), try p.car(vals), e),
         ),
-        else => p.pair(vars, vals, env),
+        else => p.pair(vars, vals, e),
     };
 }
 
@@ -411,12 +429,12 @@ fn evlis(p: *Interp, t: Expr, e: Expr) Error!Expr {
 }
 
 /// apply closure `clos` to arguments `args` in environment `env`
-pub fn reduce(l: *Interp, clos: Expr, args: Expr, env: Expr) Error!Expr {
+pub fn reduce(l: *Interp, clos: Expr, args: Expr, e: Expr) Error!Expr {
     const clos_fun = try l.car(clos);
     const clos_env = try l.cdr(clos);
     const clos_vars = try l.car(clos_fun);
     const clos_body = try l.cdr(clos_fun);
-    const eval_args = try l.evlis(args, env);
+    const eval_args = try l.evlis(args, e);
     return l.eval(clos_body, try l.bind(
         clos_vars,
         eval_args,
@@ -424,24 +442,23 @@ pub fn reduce(l: *Interp, clos: Expr, args: Expr, env: Expr) Error!Expr {
     ));
 }
 
-fn callPrim(pm: Prim, p: *Interp, t: Expr, env: Expr) Error!Expr {
+fn callPrim(pm: Prim, p: *Interp, t: Expr, e: Expr) Error!Expr {
     // trace("callPrim({t}, {f})", .{ pm, t.fmt(p) });
     return switch (pm) {
-        inline else => |tag| try @field(primitives, @tagName(tag))(p, t, env),
+        inline else => |tag| try @field(primitives, @tagName(tag))(p, t, e),
     };
 }
 
-fn apply(p: *Interp, f: Expr, t: Expr, env: Expr) Error!Expr {
+fn doApply(p: *Interp, f: Expr, t: Expr, e: Expr) Error!Expr {
     trace("apply {f} {f}", .{ f.fmt(p), t.fmt(p) });
     return switch (f.boxed.tag.int()) {
-        PRIM => try callPrim(@enumFromInt(f.ord()), p, t, env),
-        CLOS => try p.reduce(f, t, env),
+        PRIM => try callPrim(@enumFromInt(f.ord()), p, t, e),
+        CLOS => try p.reduce(f, t, e),
         MACR => unreachable,
-        else =>
-        // |i| if (i == CONS and p.isQuote(f))
-        //     try p.apply(try p.assoc(p.carAssume(p.cdrAssume(f)), env), t, env)
-        // else
-        p.err(error.CannotApply, "{s} {f}", .{ f.tagName(), f.fmt(p) }),
+        else => |i| if (i == CONS and p.isQuote(f))
+            try p.doApply(try p.assoc(p.carAssume(p.cdrAssume(f)), e), t, e)
+        else
+            p.err(error.CannotApply, "{s} {f}", .{ f.tagName(), f.fmt(p) }),
     };
 }
 
@@ -460,11 +477,10 @@ fn evarg(p: *Interp, t: *Expr, e: *Expr, a: *bool) Error!Expr {
     return if (a.*) p.dup(x) else p.eval(x, e.*);
 }
 
-fn eval(p: *Interp, x_init: Expr, _env: Expr) Error!Expr {
-    trace("eval {f}", .{x_init.fmt(p)});
-    var x = x_init;
+fn eval(p: *Interp, x0: Expr, e0: Expr) Error!Expr {
+    var x = x0;
     var y = x;
-    var e = _env;
+    var e = e0;
     var d = nil;
     var f = nil;
     var g = nil;
@@ -521,6 +537,7 @@ fn eval(p: *Interp, x_init: Expr, _env: Expr) Error!Expr {
             h = x;
             continue;
         }
+        if (f.boxed.tag.int() == CONS) {}
         if (f.boxed.tag.int() != CLOS)
             return p.err(error.OutOfMemory, "{s} {f}", .{ f.tagName(), f.fmt(p) });
         // get the list of variables v of closure f and its local environment d (use global env when nil)
@@ -558,20 +575,20 @@ fn eval(p: *Interp, x_init: Expr, _env: Expr) Error!Expr {
     return x;
 }
 
-fn eval2(p: *Interp, x: Expr, env: Expr) Error!Expr {
+fn eval2(p: *Interp, x: Expr, e: Expr) Error!Expr {
     trace("eval({f})", .{x.fmt(p)});
     return switch (x.boxed.tag.int()) {
-        ATOM => try p.assoc(x, env),
+        ATOM => try p.assoc(x, e),
         CONS => try p.apply(
-            try p.eval(try p.car(x), env),
+            try p.eval(try p.car(x), e),
             try p.cdr(x),
-            env,
+            e,
         ),
         MACR => {
             // bind macro f variables v to the given arguments literally (i.e.
             // without evaluating the arguments)
-            var d = env;
-            const f = try p.eval(try p.car(x), env);
+            var d = e;
+            const f = try p.eval(try p.car(x), e);
             var v = try p.car(f);
             var xx = try p.cdr(x);
             while (v.boxed.tag.int() == CONS) {
@@ -829,20 +846,20 @@ const primitives = struct {
     }
     /// (quote x) special form, returns x unevaluated "as is"
     pub fn quote(p: *Interp, t: Expr, _: Expr) Error!Expr {
-        return p.car(t);
+        return p.dup(try p.car(t));
     }
     /// (cons x y) construct pair (x . y)
-    pub fn cons(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        const t1 = try p.evlis(t, env);
+    pub fn cons(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        const t1 = try p.evlis(t, e);
         return p.cons(try p.car(t1), try p.car(try p.cdr(t1)));
     }
     /// (car p) car of pair p
-    pub fn car(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        return try p.car(try p.car(try p.evlis(t, env)));
+    pub fn car(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        return try p.car(try p.car(try p.evlis(t, e)));
     }
     /// (cdr p) cdr of pair p
-    pub fn cdr(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        return try p.cdr(try p.car(try p.evlis(t, env)));
+    pub fn cdr(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        return try p.cdr(try p.car(try p.evlis(t, e)));
     }
     // (list x1 x2 ... xk)
     // returns the list of `x1`, `x2`, ..., `xk`.  That is, `(x1 x2 ... xk)` with all `x` evaluated.
@@ -850,12 +867,11 @@ const primitives = struct {
         return t;
     }
     pub fn apply(p: *Interp, t: Expr, e: Expr) Error!Expr {
-        return try p.apply(p.carAssume(t), try p.car(p.cdrAssume(t)), e);
+        return try p.doApply(p.carAssume(t), try p.car(p.cdrAssume(t)), e);
     }
-
     const Op = enum { add, sub, mul, div };
-    fn mathOp(p: *Interp, t: Expr, env: Expr, comptime op: Op) Error!Expr {
-        var t1 = try p.evlis(t, env);
+    fn mathOp(p: *Interp, t: Expr, e: Expr, comptime op: Op) Error!Expr {
+        var t1 = try p.evlis(t, e);
         var n = try p.car(t1);
         while (true) {
             t1 = try p.cdr(t1);
@@ -870,29 +886,29 @@ const primitives = struct {
         return n.toNum();
     }
     /// (+ n1 n2 ... nk) sum of n1 to nk
-    pub fn @"+"(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        return mathOp(p, t, env, .add);
+    pub fn @"+"(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        return mathOp(p, t, e, .add);
     }
     /// (- n1 n2 ... nk) sum of n1 to nk
-    pub fn @"-"(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        return mathOp(p, t, env, .sub);
+    pub fn @"-"(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        return mathOp(p, t, e, .sub);
     }
     /// (* n1 n2 ... nk) sum of n1 to nk
-    pub fn @"*"(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        return mathOp(p, t, env, .mul);
+    pub fn @"*"(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        return mathOp(p, t, e, .mul);
     }
     /// (/ n1 n2 ... nk) sum of n1 to nk
-    pub fn @"/"(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        return mathOp(p, t, env, .div);
+    pub fn @"/"(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        return mathOp(p, t, e, .div);
     }
     /// (truncate n) integer part of n, round toward 0
-    pub fn truncate(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        const n = try p.car(try p.evlis(t, env));
+    pub fn truncate(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        const n = try p.car(try p.evlis(t, e));
         // @floatFromInt(@as(u128, @intFromFloat(n.float)))
         return .{ .float = @trunc(n.float) };
     }
-    fn cmpOp(p: *Interp, t: Expr, env: Expr, comptime cmp: enum { lt, gt, eq, le, ge }) Error!Expr {
-        const t1 = try p.evlis(t, env);
+    fn cmpOp(p: *Interp, t: Expr, e: Expr, comptime cmp: enum { lt, gt, eq, le, ge }) Error!Expr {
+        const t1 = try p.evlis(t, e);
         const x = try p.car(t1);
         const y = try p.car(try p.cdr(t1));
         return p.fromBool(switch (cmp) {
@@ -904,45 +920,44 @@ const primitives = struct {
         });
     }
     /// (< n1 n2) t if n1<n2, otherwise ()
-    pub fn @"<"(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        return cmpOp(p, t, env, .lt);
+    pub fn @"<"(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        return cmpOp(p, t, e, .lt);
     }
     /// (> n1 n2) t if n1>n2, otherwise ()
-    pub fn @">"(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        return cmpOp(p, t, env, .gt);
+    pub fn @">"(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        return cmpOp(p, t, e, .gt);
     }
     /// (= n1 n2) t if n1=n2, otherwise ()
-    pub fn @"eq?"(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        return cmpOp(p, t, env, .eq);
+    pub fn @"="(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        return cmpOp(p, t, e, .eq);
     }
-    pub const @"=" = @"eq?";
     /// (<= n1 n2) t if n1<=n2, otherwise ()
-    pub fn @"<="(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        return cmpOp(p, t, env, .le);
+    pub fn @"<="(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        return cmpOp(p, t, e, .le);
     }
     /// (>= n1 n2) t if n1>=n2, otherwise ()
-    pub fn @">="(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        return cmpOp(p, t, env, .ge);
+    pub fn @">="(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        return cmpOp(p, t, e, .ge);
     }
     /// (or x1 x2 ... xk) first x that is truthy, otherwise ()
-    pub fn @"or"(p: *Interp, t: Expr, env: Expr) Error!Expr {
+    pub fn @"or"(p: *Interp, t: Expr, e: Expr) Error!Expr {
         var x = Interp.nil;
         var t1 = t;
         while (true) {
             if (t1.not()) break;
-            x = try p.eval(try p.car(t1), env);
+            x = try p.eval(try p.car(t1), e);
             if (!x.not()) break;
             t1 = try p.cdr(t1);
         }
         return x;
     }
     /// (and x1 x2 ... xk) last x if all x are truthy, otherwise ()
-    pub fn @"and"(p: *Interp, t: Expr, env: Expr) Error!Expr {
+    pub fn @"and"(p: *Interp, t: Expr, e: Expr) Error!Expr {
         var x = Interp.nil;
         var t1 = t;
         while (true) {
             if (t1.not()) break;
-            x = try p.eval(try p.car(t1), env);
+            x = try p.eval(try p.car(t1), e);
             if (x.not()) break;
             t1 = try p.cdr(t1);
         }
@@ -955,10 +970,10 @@ const primitives = struct {
         return try p.car(try p.cdr(branch));
     }
     /// (defvar v x) define a named value globally
-    pub fn defvar(p: *Interp, t: Expr, env: Expr) Error!Expr {
+    pub fn defvar(p: *Interp, t: Expr, e: Expr) Error!Expr {
         const t1 = try p.cdr(t);
         const x = try p.car(t1);
-        const t2 = try p.eval(x, env);
+        const t2 = try p.eval(x, e);
         // trace("fst {f} t1 {f} x {f} t2 {f}", .{ (try p.car(t)).fmt(p), t1.fmt(p), x.fmt(p), t2.fmt(p) });
         p.env = p.pair(try p.car(t), t2, p.env);
         return try p.car(t);
@@ -971,27 +986,27 @@ const primitives = struct {
         p.env = p.pair(name, try p.closure(params, body, e), p.env);
         return name;
     }
-    pub fn cond(p: *Interp, t0: Expr, env: Expr) Error!Expr {
+    pub fn cond(p: *Interp, t0: Expr, e: Expr) Error!Expr {
         var t = t0;
-        while ((try p.eval(try p.car(try p.car(t)), env)).not()) {
+        while ((try p.eval(try p.car(try p.car(t)), e)).not()) {
             t = try p.cdr(t);
         }
         return try p.car(try p.cdr(try p.car(t)));
     }
     /// (not x) t if x is (), otherwise ()
-    pub fn not(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        return p.fromBool((try p.car(try p.evlis(t, env))).not());
+    pub fn not(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        return p.fromBool((try p.car(try p.evlis(t, e))).not());
     }
     /// (lambda v x) construct a closure
-    pub fn lambda(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        return p.closure(try p.car(t), try p.car(try p.cdr(t)), env);
+    pub fn lambda(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        return p.closure(try p.car(t), try p.car(try p.cdr(t)), e);
     }
     /// (let* ((k1 v1) (k2 v2) ... (kk vk)) y1 ... yn)
     /// eval `y`s with `kv`s in env
-    pub fn @"let*"(p: *Interp, t0: Expr, env: Expr) Error!Expr {
-        var kvs = try p.car(t0);
+    pub fn @"let*"(p: *Interp, t: Expr, e0: Expr) Error!Expr {
+        var kvs = try p.car(t);
         var kv = try p.car(kvs);
-        var e = env;
+        var e = e0;
         while (p.let(kv)) {
             e = p.pair(
                 try p.car(kv),
@@ -1002,7 +1017,7 @@ const primitives = struct {
             kv = p.carOpt(kvs) orelse break;
         }
 
-        var current = p.cdrOpt(t0) orelse return Interp.nil;
+        var current = p.cdrOpt(t) orelse return Interp.nil;
         var result = Interp.nil;
         while (current.boxed.tag.int() == CONS) {
             result = try p.eval(p.carAssume(current), e);
@@ -1010,22 +1025,22 @@ const primitives = struct {
         }
         return result;
     }
-    pub fn @"pair?"(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        const x = try p.car(try p.evlis(t, env));
+    pub fn consp(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        const x = try p.car(try p.evlis(t, e));
         return p.fromBool(x.boxed.tag == .cons);
     }
     /// (progn (x1 x2 ...)) evaluates each x$i, returning the last one
-    pub fn progn(p: *Interp, t: Expr, env: Expr) Error!Expr {
+    pub fn progn(p: *Interp, t: Expr, e: Expr) Error!Expr {
         var result = Interp.nil;
         var current = t;
         while (current.boxed.tag == .cons) {
-            result = try p.eval(try p.car(current), env);
+            result = try p.eval(try p.car(current), e);
             current = try p.cdr(current);
         }
         return result;
     }
-    pub fn print(p: *Interp, t: Expr, env: Expr) Error!Expr {
-        const t1 = try p.car(try p.evlis(t, env));
+    pub fn print(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        const t1 = try p.car(try p.evlis(t, e));
         try p.w.print("{f}\n", .{t1.fmt(p)});
         try p.w.flush();
         return t1;
@@ -1049,6 +1064,21 @@ const primitives = struct {
         // L f_macro(L t,L *_) { return macro(dup(car(t)),dup(car(cdr(t)))); }
         return p.macro(try p.car(t), try p.car(try p.cdr(t)));
     }
+    /// object equality - whether two objects are the same object in memory
+    pub fn eq(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        const a = try p.eval(try p.car(t), e);
+        const b = try p.eval(try p.car(try p.cdr(t)), e);
+        return p.fromBool(if (a.isTagged() and b.isTagged())
+            a.ord() == b.ord()
+        else
+            a.int == b.int);
+    }
+    /// structural equality
+    pub fn equal(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        const a = try p.eval(try p.car(t), e);
+        const b = try p.eval(try p.car(try p.cdr(t)), e);
+        return p.fromBool(a.equStructural(b, p));
+    }
 
     test @"let*" {
         try testEval("3",
@@ -1056,13 +1086,23 @@ const primitives = struct {
         );
     }
     test load {
-        try testEval("begin", "(load src/common.lisp)");
+        try testEval("!=", "(load src/common.lisp)");
     }
     test list {
         try testEval("(1 2)", "(list 1 2)");
     }
     test "macro" {
         try testEval("4", "(defun double (x) (+ x x)) (double 2)");
+    }
+    test "= eq equal" {
+        try testEval("t", "(eq 3 3)");
+        try testEval("t", "(= 3 3)");
+        try testEval("()", "(eq '(1 2) '(1 2))"); // different list objects
+        try testEval("t", "(equal '(5) '(5))");
+        try testEval("t", "(equal '(1 2) '(1 2))");
+    }
+    test apply {
+        try testEval("6", "(apply '+ '(1 2 3))");
     }
 };
 
