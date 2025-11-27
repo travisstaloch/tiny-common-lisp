@@ -1,143 +1,90 @@
-(define equal?
-    (lambda (x y)
-        (or
-            (eq? x y)
-            (and
-                (pair? x)
-                (pair? y)
-                (equal? (car x) (car y))
-                (equal? (cdr x) (cdr y))))))
+(defun run-test (name expected actual)
+  (print (cons
+    (if (equal expected actual)
+      'passed
+      'failed) name)))
 
-(define list (lambda args args))
+(run-test 'apply
+  6
+  (apply '+ '(1 2 3)))
 
-(cons
-    (if (equal?
-            ((lambda (l) (+ . l)) '(1 2 3))
-            6)
-        'passed
-        'failed)
-    '(+))
+(run-test '+
+  6
+  ((lambda (l) (apply '+ l)) '(1 2 3)))
 
-(cons
-    (if (equal?
-            ((lambda (l) (- . l)) '(1 2 3))
-            -4)
-        'passed
-        'failed)
-    '(-))
+(run-test '-
+  -4
+  ((lambda (l) (apply '- l)) '(1 2 3)))
 
-(cons
-    (if (equal?
-            ((lambda (l) (* . l)) '(1 2 3))
-            6)
-        'passed
-        'failed)
-    '(*))
+(run-test '*
+  6
+  ((lambda (l) (apply '* l)) '(1 2 3)))
 
-(cons
-    (if (equal?
-            ((lambda (l) (/ . l)) '(1 2))
-            0.5)
-        'passed
-        'failed)
-    '(/))
+(run-test '/
+  (/ 1 2)
+  ((lambda (l) (apply '/ l)) '(1 2)))
 
-(cons
-    (if (equal?
-            (let*
-                ((x 1) (y (+ 1 x)))
-                (let* ((z (+ x y))) z))
-            3)
-        'passed
-        'failed)
-    '(let*))
+(run-test 'let*
+   3
+   (let*
+       ((x 1) (y (+ 1 x)))
+       (let* ((z (+ x y))) z)))
 
-(cons
-    (if (equal?
-            (let*
-                ((x 2))
-                ((let* ((f +) (x 1)) (lambda (y) (f x y))) x))
-            3)
-        'passed
-        'failed)
-    '(static scoping))
+(run-test 'static-scoping
+  3
+  (let*
+      ((x 2))
+      ((lambda (y)
+         (let* ((f '+) (x 1))
+           (apply f (list x y))))
+       x)))
 
-(cons
-    (if (equal?
-            (((lambda (f x)
-                (lambda args (f x . args))) + 1) 2 3)
-            6)
-        'passed
-        'failed)
-    '(currying))
+(run-test 'currying
+  15
+  (let*
+    ((adder (lambda (n) (lambda (x) (+ x n))))
+     (add5 (apply adder '(5))))
+    (apply add5 '(10))))
 
-(cons
-    (if (equal?
-            ((lambda (x y z) (list x y z)) '(1) '(2) '(3))
-            '((1) (2) (3)))
-        'passed
-        'failed)
-    '(same args))
+(run-test 'same-args
+  '((1) (2) (3))
+  ((lambda (x y z) (list x y z)) '(1) '(2) '(3)))
 
-(cons
-    (if (equal?
-            ((lambda (x y) (list x y)) '(1) '(2) '(3))
-            '((1) (2)))
-        'passed
-        'failed)
-    '(extra args))
+; y combinator - https://rosettacode.org/wiki/Y_combinator#Common_Lisp
+(defun Y (f)
+  ((lambda (g) (funcall g g))
+   (lambda (g)
+     (funcall f (lambda (&rest a)
+		  (apply (funcall g g) a))))))
 
-(cons
-    (if (equal?
-            ((lambda (l)
-                ((lambda (x y z) (list x y z)) '(1) '(2) . l)) '((3)))
-            '((1) (2) (3)))
-        'passed
-        'failed)
-    '(caller dot))
+(defun y-factorial (n)
+  (funcall
+   (Y (lambda (f)
+       (lambda (n)
+         (if (= 0 n)
+	         1
+	         (* n (funcall f (- n 1)))))))
+   n))
 
-(cons
-    (if (equal?
-            ((lambda (x y . z) (list x y z)) '(1) '(2) '(3))
-            '((1) (2) ((3))))
-        'passed
-        'failed)
-    '(callee dot))
+(run-test 'y-factorial 120 (y-factorial 5))
 
-(cons
-    (if (equal?
-            ((lambda (l)
-                ((lambda (x y . z) (list x y z)) '(1) '(2) . l)) '((3)))
-            '((1) (2) ((3))))
-        'passed
-        'failed)
-    '(both dot))
+; (sqrt n) -- solve x^2 - n = 0 with Newton method
+(defun y-sqrt (n)
+  (funcall
+    (Y (lambda (f)
+        (lambda (x)
+          (let*
+            ((y (- x (/ (- x (/ n x)) 2))))
+            ; (print (cons x y))
+            ; (if (< (abs (- x y)) 0.00001)
+            (if (= x y)
+                x
+                (funcall f y))))))
+  n))
 
-(cons
-    (if (equal?
-            ((lambda (l)
-                ((lambda (x . y) (list x y)) '(1) '(2) . l)) '((3)))
-            '((1) ((2) (3))))
-        'passed
-        'failed)
-    '(extra dot))
+(run-test 'y-sqrt 5.0 (y-sqrt 25.0))
 
-(cons
-    (if (equal?
-            ((lambda (l)
-                ((lambda (x . y) (list x y)) '(1) . l)) '((2) (3)))
-            '((1) ((2) (3))))
-        'passed
-        'failed)
-    '(scant dot))
+(defun rest-as-list (a b &rest rest) (list a b rest))
+(run-test 'rest-params '(1 2 (3 4 5)) (rest-as-list 1 2 3 4 5))
 
-(cons
-    (if (equal?
-            ((lambda (l)
-                ((lambda (x y . z) (list x y z)) '(1) . l)) '((2) (3)))
-            '((1) (2) ((3))))
-        'passed
-        'failed)
-    '(early dot))
-
-'OK
+(print 'OK)

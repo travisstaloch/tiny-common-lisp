@@ -16,7 +16,7 @@ print_mode: PrintMode,
 
 const PrintMode = enum {
     quiet,
-    /// print loop intermediate results
+    /// print loop intermediate results in run()
     repl,
 };
 
@@ -59,7 +59,7 @@ pub const Expr = extern union {
         prim = 0x7ff9, // 0b0111111111111_001
         cons = 0x7ffa, // 0b0111111111111_010
         clos = 0x7ffb, // 0b0111111111111_011
-        macr = 0x7ffc, //  0b0111111111111_100
+        macr = 0x7ffc, // 0b0111111111111_100
         nil = 0x7ffd, //  0b0111111111111_101
 
         pub fn int(t: Tag) u16 {
@@ -403,15 +403,28 @@ fn let(p: *Interp, x: Expr) bool {
     return !x.not() and !(if (p.cdrOpt(x)) |y| y.not() else true);
 }
 
-// create environment by extending `env` with variables `vars` bound to values `vals` */
+// create environment by extending `env` with variables `vars` bound to values `vals`
+// &rest is a parameter pattern that allows a function to accept a variable
+// number of arguments, collecting all remaining arguments into a list.
 fn bind(p: *Interp, vars: Expr, vals: Expr, e: Expr) Error!Expr {
+    trace("bind vars {f}", .{vars.fmt(p)});
     return switch (vars.boxed.tag.int()) {
         NIL_ => e,
-        CONS => p.bind(
-            try p.cdr(vars),
-            try p.cdr(vals),
-            p.pair(try p.car(vars), try p.car(vals), e),
-        ),
+        CONS => blk: {
+            const v = try p.car(vars);
+            trace("bind v {f}", .{v.fmt(p)});
+            if (v.boxed.tag == .atom and std.mem.eql(u8, "&rest", p.atomName(v))) {
+                // collect remaining args into a list
+                const rest = try p.car(try p.cdr(vars));
+                return p.pair(rest, vals, e);
+            }
+
+            break :blk p.bind(
+                try p.cdr(vars),
+                try p.cdr(vals),
+                p.pair(v, try p.car(vals), e),
+            );
+        },
         else => p.pair(vars, vals, e),
     };
 }
@@ -428,17 +441,17 @@ fn evlis(p: *Interp, t: Expr, e: Expr) Error!Expr {
     };
 }
 
-/// apply closure `clos` to arguments `args` in environment `env`
-pub fn reduce(l: *Interp, clos: Expr, args: Expr, e: Expr) Error!Expr {
-    const clos_fun = try l.car(clos);
-    const clos_env = try l.cdr(clos);
-    const clos_vars = try l.car(clos_fun);
-    const clos_body = try l.cdr(clos_fun);
-    const eval_args = try l.evlis(args, e);
-    return l.eval(clos_body, try l.bind(
+/// apply closure `clos` to arguments `args` in environment `e`
+pub fn reduce(p: *Interp, clos: Expr, args: Expr, e: Expr) Error!Expr {
+    const clos_fun = try p.car(clos);
+    const clos_env = try p.cdr(clos);
+    const clos_vars = try p.car(clos_fun);
+    const clos_body = try p.cdr(clos_fun);
+    const eval_args = try p.evlis(args, e);
+    return p.eval(clos_body, try p.bind(
         clos_vars,
         eval_args,
-        if (clos_env.not()) l.env else clos_env,
+        if (clos_env.not()) p.env else clos_env,
     ));
 }
 
@@ -450,15 +463,25 @@ fn callPrim(pm: Prim, p: *Interp, t: Expr, e: Expr) Error!Expr {
 }
 
 fn doApply(p: *Interp, f: Expr, t: Expr, e: Expr) Error!Expr {
-    trace("apply {f} {f}", .{ f.fmt(p), t.fmt(p) });
+    trace("doApply {f} {f}", .{ f.fmt(p), t.fmt(p) });
     return switch (f.boxed.tag.int()) {
         PRIM => try callPrim(@enumFromInt(f.ord()), p, t, e),
         CLOS => try p.reduce(f, t, e),
-        MACR => unreachable,
-        else => |i| if (i == CONS and p.isQuote(f))
-            try p.doApply(try p.assoc(p.carAssume(p.cdrAssume(f)), e), t, e)
-        else
-            p.err(error.CannotApply, "{s} {f}", .{ f.tagName(), f.fmt(p) }),
+        MACR => blk: {
+            var d = e;
+            var x = t;
+            var v = try p.car(f);
+            while (v.boxed.tag == .cons) {
+                d = p.pair(try p.car(v), try p.car(x), d);
+                trace("doApply macr x {f} v {f}", .{ x.fmt(p), v.fmt(p) });
+                x = try p.cdr(x);
+                v = try p.cdr(v);
+            }
+            if (v.boxed.tag == .atom) d = p.pair(v, x, d);
+            const expanded = try p.eval(try p.cdr(f), d);
+            break :blk try p.eval(expanded, e);
+        },
+        else => p.err(error.CannotApply, "{s} {f}", .{ f.tagName(), f.fmt(p) }),
     };
 }
 
@@ -467,146 +490,41 @@ fn dup(_: *Interp, x: Expr) Expr {
     return x;
 }
 
-fn evarg(p: *Interp, t: *Expr, e: *Expr, a: *bool) Error!Expr {
-    if (t.boxed.tag.int() == ATOM) {
-        t.* = try p.assoc(t.*, e.*);
-        a.* = true;
-    }
-    const x = try p.car(t.*);
-    t.* = try p.cdr(t.*);
-    return if (a.*) p.dup(x) else p.eval(x, e.*);
-}
-
-fn eval(p: *Interp, x0: Expr, e0: Expr) Error!Expr {
-    var x = x0;
-    var y = x;
-    var e = e0;
-    var d = nil;
-    var f = nil;
-    var g = nil;
-    var h = nil;
-    while (true) {
-        trace("eval {s}: {f}", .{ x.tagName(), x.fmt(p) });
-        // copy x to y to output y => x when tracing is enabled
-        y = x;
-        // if x is an atom, then return its value; if x is not an application
-        // list (it is constant), then return x
-        if (x.boxed.tag.int() == ATOM) {
-            x = p.dup(try p.assoc(x, e));
-            break;
-        }
-        if (x.boxed.tag.int() != CONS) {
-            x = p.dup(x);
-            break;
-        }
-        // save g = old f to garbage collect, evaluate f in the application (f . x) and get the list of arguments x
-        g = f;
-        f = try p.eval(try p.car(x), e);
-        x = try p.cdr(x);
-        if (f.boxed.tag.int() == PRIM) {
-            // apply Lisp primitive to argument list x, return value in x
-            // x = prim[ord(f)].f(x,&e);
-            const pm: Prim = @enumFromInt(f.ord());
-            // try p.w.print("pm {t}\n", .{pm});
-            x = try callPrim(pm, p, x, e);
-            // garbage collect g = old f, garbage collect old macro body h
-            // gc(g);
-            g = nil;
-            //gc(h);
-            h = nil;
-            // if tail-call then continue evaluating x, otherwise return x
-            if (isPrimTailCall(pm)) continue;
-            break;
-        }
-        if (f.boxed.tag.int() == MACR) {
-            // bind macro f variables v to the given arguments literally (i.e. without evaluating the arguments)
-            d = p.dup(p.env);
-            var v = try p.car(f);
-            while (v.boxed.tag.int() == CONS) {
-                d = p.pair(try p.car(v), p.dup(try p.car(x)), d);
-                v = try p.cdr(v);
-                x = try p.cdr(x);
-            }
-            if (v.boxed.tag.int() == ATOM) d = p.pair(v, p.dup(x), d);
-            // expand macro f, then continue evaluating the expanded x
-            x = try p.eval(try p.cdr(f), d);
-            // garbage collect bindings d, gabage collect g = old f and old macro body h, save macro body h = x to gc later
-            // gc(d);
-            d = nil; // gc(g);
-            g = nil; // gc(h);
-            h = x;
-            continue;
-        }
-        if (f.boxed.tag.int() == CONS) {}
-        if (f.boxed.tag.int() != CLOS)
-            return p.err(error.OutOfMemory, "{s} {f}", .{ f.tagName(), f.fmt(p) });
-        // get the list of variables v of closure f and its local environment d (use global env when nil)
-        var v = try p.car(try p.car(f));
-        d = p.dup(try p.cdr(f));
-        if (d.boxed.tag.int() == NIL_) d = p.dup(p.env);
-        // bind closure f variables v to the evaluated argument values
-        var a = false;
-        while (v.boxed.tag.int() == CONS) {
-            d = p.pair(p.carAssume(v), try p.evarg(&x, &e, &a), d);
-            v = p.cdrAssume(v);
-        }
-        if (v.boxed.tag.int() == ATOM)
-            d = p.pair(v, if (a) p.dup(x) else try p.evlis(x, e), d);
-        // next, evaluate body x of closure f in environment e = d while keeping f in memory as long as x
-        x = try p.cdr(try p.car(f));
-        // discard copy of the old environment e to use new environment d
-        // gc(e);
-        e = d;
-        d = nil;
-        // garbage collect closure g = old f with old body x, garbage collect old macro body h
-        // gc(g);
-        g = nil;
-        // gc(h);
-        h = nil;
-        // if (tr) trace(y, x, e);
-        trace("eval {f} => {f}", .{ y.fmt(p), x.fmt(p) });
-    }
-    trace("eval {f} => {f}", .{ y.fmt(p), x.fmt(p) });
-
-    // garbage collect environment e, closure f, macro body h
-    // gc(e); gc(f); gc(h);
-    // deregister 5 variables, if registered, without gc'ing them
-    // rr(5);
-    return x;
-}
-
-fn eval2(p: *Interp, x: Expr, e: Expr) Error!Expr {
-    trace("eval({f})", .{x.fmt(p)});
-    return switch (x.boxed.tag.int()) {
-        ATOM => try p.assoc(x, e),
-        CONS => try p.apply(
-            try p.eval(try p.car(x), e),
-            try p.cdr(x),
+fn eval(p: *Interp, t: Expr, e: Expr) Error!Expr {
+    errdefer trace("eval error on {f}", .{t.fmt(p)});
+    const ret = switch (t.boxed.tag.int()) {
+        ATOM => try p.assoc(t, e),
+        CONS => try p.doApply(
+            try p.eval(try p.car(t), e),
+            try p.cdr(t),
             e,
         ),
         MACR => {
             // bind macro f variables v to the given arguments literally (i.e.
             // without evaluating the arguments)
             var d = e;
-            const f = try p.eval(try p.car(x), e);
+            const f = try p.eval(try p.car(t), e);
             var v = try p.car(f);
-            var xx = try p.cdr(x);
+            var x = try p.cdr(t);
             while (v.boxed.tag.int() == CONS) {
-                d = p.pair(try p.car(v), try p.car(xx), d);
+                d = p.pair(try p.car(v), try p.car(x), d);
                 v = try p.cdr(v);
-                xx = try p.cdr(xx);
+                x = try p.cdr(x);
             }
             if (v.boxed.tag.int() == ATOM) {
-                d = p.pair(v, xx, d);
+                d = p.pair(v, x, d);
             }
             // expand macro f, then continue evaluating the expanded x
             return try p.eval(try p.cdr(f), d);
         },
-        else => x,
+        else => t,
     };
+    trace("eval\n  {f}\n  => {f}", .{ t.fmt(p), ret.fmt(p) });
+    return ret;
 }
 
-// TODO make streaming. replace src field with buffer and reader of some kind.  must be non seekable.
+// TODO make streaming. replace src field with buffer and reader of some kind.
+// must be non seekable.
 pub const Tokenizer = struct {
     src: [:0]const u8,
     file_path: []const u8,
@@ -846,6 +764,7 @@ const primitives = struct {
     }
     /// (quote x) special form, returns x unevaluated "as is"
     pub fn quote(p: *Interp, t: Expr, _: Expr) Error!Expr {
+        if (!(try p.cdr(t)).not()) return p.err(error.User, "quote expected one arg. found {f}", .{t.fmt(p)});
         return p.dup(try p.car(t));
     }
     /// (cons x y) construct pair (x . y)
@@ -863,11 +782,69 @@ const primitives = struct {
     }
     // (list x1 x2 ... xk)
     // returns the list of `x1`, `x2`, ..., `xk`.  That is, `(x1 x2 ... xk)` with all `x` evaluated.
-    pub fn list(_: *Interp, t: Expr, _: Expr) Error!Expr {
-        return t;
+    pub fn list(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        return p.evlis(t, e);
     }
+    /// (apply f arg1 arg2 ... argn-list)
+    /// argn-list is a list
     pub fn apply(p: *Interp, t: Expr, e: Expr) Error!Expr {
-        return try p.doApply(p.carAssume(t), try p.car(p.cdrAssume(t)), e);
+        if (t.not()) return p.err(error.User, "apply missing function arg", .{});
+
+        var f = try p.car(t);
+        if (f.boxed.tag == .cons and p.isQuote(f))
+            f = p.carAssume(p.cdrAssume(f));
+
+        f = try p.eval(f, e);
+        if (f.boxed.tag == .atom)
+            f = try p.assoc(f, p.env);
+
+        const args = try p.evlis(try p.cdr(t), e); // args = (arg1 arg2 ... argn list)
+        if (args.not()) return try p.doApply(f, args, e);
+
+        // build argument list
+        var args2 = nil;
+        var tail: ?Expr = null; // last cons cell for appending
+        var current = args;
+        while (current.boxed.tag == .cons) {
+            const next = try p.cdr(current);
+            if (next.boxed.tag != .cons) {
+                const list_part = try p.car(current);
+                if (tail) |tl|
+                    // append list_part to the end of args2
+                    p.memory[tl.ord()] = list_part
+                else
+                    // no individual args, args2 is just the list
+                    args2 = list_part;
+
+                break;
+            }
+            // add the current arg to the end of args2
+            const new_cons = p.cons(try p.car(current), nil);
+            if (tail) |tl|
+                p.memory[tl.ord()] = new_cons
+            else
+                args2 = new_cons;
+
+            tail = new_cons;
+            current = next;
+        }
+
+        return try p.doApply(f, args2, e);
+    }
+    /// (funcall function args)
+    /// applies function to args. If function is a symbol, it is coerced to a
+    /// function as if by finding its functional value
+    pub fn funcall(p: *Interp, t: Expr, e: Expr) Error!Expr {
+        if (t.not()) return p.err(error.User, "funcall missing function arg", .{});
+        var f = try p.car(t);
+        if (f.boxed.tag == .cons and p.isQuote(f))
+            f = p.carAssume(p.cdrAssume(f));
+        f = try p.eval(f, e);
+        if (f.boxed.tag == .atom)
+            f = try p.assoc(f, p.env);
+        // Evaluate all arguments normally (no list splicing like apply)
+        const args = try p.evlis(try p.cdr(t), e);
+        return try p.doApply(f, args, e);
     }
     const Op = enum { add, sub, mul, div };
     fn mathOp(p: *Interp, t: Expr, e: Expr, comptime op: Op) Error!Expr {
@@ -966,8 +943,10 @@ const primitives = struct {
     /// (if x y z) if x then y else z
     pub fn @"if"(p: *Interp, t: Expr, e: Expr) Error!Expr {
         const cnd = p.gc(try p.eval(try p.car(t), e));
-        const branch = if (cnd.not()) try p.cdr(t) else t;
-        return try p.car(try p.cdr(branch));
+        const branches = try p.cdr(t);
+        const res = try p.car(if (cnd.not()) try p.cdr(branches) else branches);
+        trace("if cnd {f} branches {f} res {f}", .{ cnd.fmt(p), branches.fmt(p), res.fmt(p) });
+        return try p.eval(res, e);
     }
     /// (defvar v x) define a named value globally
     pub fn defvar(p: *Interp, t: Expr, e: Expr) Error!Expr {
@@ -983,6 +962,7 @@ const primitives = struct {
         const name = try p.car(t);
         const params = try p.car(try p.cdr(t));
         const body = try p.car(try p.cdr(try p.cdr(t)));
+        trace("defun name:{f} params:{f} body:{f}", .{ name.fmt(p), params.fmt(p), body.fmt(p) });
         p.env = p.pair(name, try p.closure(params, body, e), p.env);
         return name;
     }
@@ -1002,7 +982,7 @@ const primitives = struct {
         return p.closure(try p.car(t), try p.car(try p.cdr(t)), e);
     }
     /// (let* ((k1 v1) (k2 v2) ... (kk vk)) y1 ... yn)
-    /// eval `y`s with `kv`s in env
+    /// eval `y`s with `kv`s in e0
     pub fn @"let*"(p: *Interp, t: Expr, e0: Expr) Error!Expr {
         var kvs = try p.car(t);
         var kv = try p.car(kvs);
@@ -1084,15 +1064,22 @@ const primitives = struct {
         try testEval("3",
             \\(let* ((x 1) (y 2)) (let* ((z (+ x y))) z))
         );
+        try testEval("3",
+            \\(let* ((x 2)) ((lambda (y) (let* ((f '+) (x 1)) (apply f (list x y)))) x))
+        );
     }
     test load {
-        try testEval("!=", "(load src/common.lisp)");
+        try testEval("6", "(load examples/basic.lisp)");
     }
     test list {
         try testEval("(1 2)", "(list 1 2)");
     }
     test "macro" {
-        try testEval("4", "(defun double (x) (+ x x)) (double 2)");
+        try testEval("4",
+            \\(defvar defun-macro (macro (f v x) (list 'defvar f (list 'lambda v x))))
+            \\(defun-macro double (x) (+ x x))
+            \\(double 2)
+        );
     }
     test "= eq equal" {
         try testEval("t", "(eq 3 3)");
@@ -1103,6 +1090,17 @@ const primitives = struct {
     }
     test apply {
         try testEval("6", "(apply '+ '(1 2 3))");
+        try testEval("10", "(apply '+ 1 2 '(3 4))");
+    }
+    test defun {
+        try testEval("4", "(defun double (x) (+ x x)) (double 2)");
+    }
+    test "&rest" {
+        try testEval("(1 2 (3 4 5))",
+            \\(defun rest-as-list (a b &rest rest)
+            \\  (list a b rest))
+            \\(rest-as-list 1 2 3 4 5)
+        );
     }
 };
 
@@ -1179,8 +1177,8 @@ fn testParseFmt(c: TestCase) !void {
 }
 
 test "parse fmt rountrip" {
-    try testParseFmt(.{ .file_path = "examples/basic.scm" });
-    try testParseFmt(.{ .file_path = "examples/fizzbuzz.scm" });
+    try testParseFmt(.{ .file_path = "examples/basic.lisp" });
+    try testParseFmt(.{ .file_path = "examples/fizzbuzz.lisp" });
     try testParseFmt(.{ .file_path = "examples/sqrt.lisp" });
     try testParseFmt(.{ .file_path = "tests/dotcall.lisp" });
 }
