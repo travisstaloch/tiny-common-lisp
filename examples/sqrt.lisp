@@ -1,17 +1,33 @@
+
+(defun Y (f)
+  ((lambda (g) (funcall g g))
+   (lambda (g)
+     (funcall f (lambda (&rest a)
+		  (apply (funcall g g) a))))))
+
+(defun fac (n)
+  (funcall
+   (Y (lambda (f)
+       (lambda (n)
+         (if (= n 0)
+	         1
+	         (* n (funcall f (- n 1)))))))
+   n))
+
+(print (fac 5))
+
 ; (sqrt n) -- solve x^2 - n = 0 with Newton method using the Y combinator to recurse
-; ... we could add math.h sqrt() as a Lisp primitive, but what's the fun in that?
-
-(defun Y (f) (lambda (args) (cons (f (Y f)) args)))
-
 (defun mysqrt (n)
+  (funcall
     (Y (lambda (f)
-            (lambda (x)
-                (let*
-                    ((y (- x (/ (- x (/ n x)) 2))))
-                    (if (eq? x y)
-                        x
-                        (f y))))))
-     n)
+        (lambda (x)
+          (let*
+            ((y (- x (/ (- x (/ n x)) 2))))
+            (if (= x y)
+                x
+                (funcall f y))))))
+  n))
 
 
-(print (mysqrt 25))
+
+(print (mysqrt 25.0))
