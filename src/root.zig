@@ -1,9 +1,12 @@
 //!
-//! adapted from / inspired by
+//! adapted from
 //!   https://github.com/Robert-van-Engelen/tinylisp
 //!   https://github.com/daneelsan/tinylisp/
 //! references
 //!   https://github.com/cryptocode/bio
+//!   https://github.com/tekknolagi/blog-lisp/tree/a02545444f34c1eb785490827d4197141baac113
+//!   https://github.com/jvk36/RMM
+//!   https://github.com/eudoxia0/interim
 //!
 
 const Interp = @This();

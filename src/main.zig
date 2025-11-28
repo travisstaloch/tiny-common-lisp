@@ -47,6 +47,7 @@ pub fn main() !void {
         try stdout.print(
             // banner genrated at
             // https://patorjk.com/software/taag/#p=display&f=Small+Block&t=tiny-common-lisp&x=none&v=4&h=4&w=80&we=false
+            \\
             \\  ▐  ▗                                 ▜ ▗       
             \\  ▜▀ ▄ ▛▀▖▌ ▌▄▄▖▞▀▖▞▀▖▛▚▀▖▛▚▀▖▞▀▖▛▀▖▄▄▖▐ ▄ ▞▀▘▛▀▖
             \\  ▐ ▖▐ ▌ ▌▚▄▌   ▌ ▖▌ ▌▌▐ ▌▌▐ ▌▌ ▌▌ ▌   ▐ ▐ ▝▀▖▙▄▘

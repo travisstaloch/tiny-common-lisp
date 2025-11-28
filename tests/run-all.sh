@@ -6,7 +6,7 @@ zig build test --summary all
 
 function check() {
     echo "check $1"
-    zig build run -- --banner false --script $1 > /tmp/tinycl-actual.txt
+    zig build run -- --no-banner --script $1 > /tmp/tinycl-actual.txt
     sbcl --script $1 > /tmp/tinycl-expected.txt
     diff -u --ignore-case --ignore-all-space --ignore-space-change \
          --ignore-trailing-space --ignore-blank-lines \
