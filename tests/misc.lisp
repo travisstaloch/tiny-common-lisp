@@ -1,8 +1,4 @@
-(defun run-test (name expected actual)
-  (print (cons
-    (if (equal expected actual)
-      'passed
-      'failed) name)))
+(load "tests/helpers.lisp")
 
 (run-test 'apply
   6

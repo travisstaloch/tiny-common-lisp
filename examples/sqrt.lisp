@@ -24,7 +24,7 @@
           (let*
             ((y (- x (/ (- x (/ n x)) 2))))
             (if (= x y)
-                x
+                (truncate x)
                 (funcall f y))))))
   n))
 

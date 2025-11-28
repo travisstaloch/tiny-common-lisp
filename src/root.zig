@@ -222,9 +222,13 @@ pub fn atom(p: *Interp, s: []const u8) Expr {
     return box(.atom, i);
 }
 
+/// unquotes atoms starting with `"` and asserts last char is `"`
 pub fn atomName(p: *Interp, x: Expr) []const u8 {
     assert(x.boxed.tag == .atom);
-    return std.mem.sliceTo(p.heap()[x.ord()..], 0);
+    const ret = std.mem.sliceTo(p.heap()[x.ord()..], 0);
+    const quoted = @intFromBool(ret[0] == '"');
+    assert(quoted == 0 or ret[ret.len - 1] == '"');
+    return ret[quoted .. ret.len - quoted];
 }
 
 pub fn cons(p: *Interp, x: Expr, y: Expr) Expr {
@@ -393,27 +397,56 @@ fn let(p: *Interp, x: Expr) bool {
     return !x.not() and !(if (p.cdrOpt(x)) |y| y.not() else true);
 }
 
-// create environment by extending `env` with variables `vars` bound to values `vals`
-// &rest is a parameter pattern that allows a function to accept a variable
-// number of arguments, collecting all remaining arguments into a list.
+const BindMode = enum { normal, optional, rest };
+
+/// create environment by extending `env` with variables `vars` bound to values `vals`
+/// `&rest` is a parameter pattern that allows a function to accept a variable
+/// number of arguments, collecting all remaining arguments into a list.
+/// `&optional` pattern marks an argument as optional with default value nil.
 fn bind(p: *Interp, vars: Expr, vals: Expr, e: Expr) Error!Expr {
+    return p.bindMode(vars, vals, e, .normal);
+}
+fn bindMode(p: *Interp, vars: Expr, vals: Expr, e: Expr, mode: BindMode) Error!Expr {
     trace("bind vars {f}", .{vars.fmt(p)});
     return switch (vars.boxed.tag.int()) {
         NIL_ => e,
         CONS => blk: {
             const v = try p.car(vars);
             trace("bind v {f}", .{v.fmt(p)});
-            if (v.boxed.tag == .atom and std.mem.eql(u8, "&rest", p.atomName(v))) {
-                // collect remaining args into a list
-                const rest = try p.car(try p.cdr(vars));
-                return p.pair(rest, vals, e);
+            if (v.boxed.tag == .atom) {
+                const name = p.atomName(v);
+                if (std.mem.eql(u8, "&optional", name)) {
+                    break :blk try p.bindMode(try p.cdr(vars), vals, e, .optional);
+                }
+                if (std.mem.eql(u8, "&rest", name)) { // wrap rest args in list
+                    const rest = try p.car(try p.cdr(vars));
+                    break :blk p.pair(rest, vals, e);
+                }
             }
 
-            break :blk p.bind(
-                try p.cdr(vars),
-                try p.cdr(vals),
-                p.pair(v, try p.car(vals), e),
-            );
+            break :blk switch (mode) {
+                .normal => p.bindMode(
+                    try p.cdr(vars),
+                    try p.cdr(vals),
+                    p.pair(v, try p.car(vals), e),
+                    .normal,
+                ),
+                .optional => if (vals.boxed.tag.int() == CONS)
+                    p.bindMode(
+                        try p.cdr(vars),
+                        try p.cdr(vals),
+                        p.pair(v, try p.car(vals), e),
+                        .optional,
+                    )
+                else
+                    p.bindMode(
+                        try p.cdr(vars),
+                        vals,
+                        p.pair(v, nil, e),
+                        .optional,
+                    ),
+                .rest => unreachable,
+            };
         },
         else => p.pair(vars, vals, e),
     };

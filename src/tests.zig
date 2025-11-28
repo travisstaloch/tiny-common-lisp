@@ -64,6 +64,7 @@ test "parse fmt rountrip" {
     try testParseFmt(.{ .file_path = "examples/fizzbuzz.lisp" });
     try testParseFmt(.{ .file_path = "examples/sqrt.lisp" });
     try testParseFmt(.{ .file_path = "tests/misc.lisp" });
+    try testParseFmt(.{ .file_path = "tests/args.lisp" });
 }
 
 pub fn testEval(expected: []const u8, src: [:0]const u8) !void {
@@ -77,11 +78,4 @@ pub fn testEval(expected: []const u8, src: [:0]const u8) !void {
 
 test "nil sym" {
     try testEval("()", "nil");
-}
-test "&rest" {
-    try testEval("(1 2 (3 4 5))",
-        \\(defun rest-as-list (a b &rest rest)
-        \\  (list a b rest))
-        \\(rest-as-list 1 2 3 4 5)
-    );
 }

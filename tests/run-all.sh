@@ -1,3 +1,7 @@
+#!/usr/bin/env bash
+
+set -e
+
 zig build test --summary all
 
 function check() {
@@ -13,3 +17,4 @@ check examples/basic.lisp
 check examples/fizzbuzz.lisp
 check examples/sqrt.lisp
 check tests/misc.lisp
+check tests/args.lisp
