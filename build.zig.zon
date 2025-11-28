@@ -1,8 +1,8 @@
 .{
     .name = .tiny_common_lisp,
-    .version = "0.0.0",
+    .version = "0.0.1",
     .fingerprint = 0x7fd21a83a5624f27, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.15.1",
+    .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .flagset = .{
             .url = "git+https://github.com/travisstaloch/flagset#d3e3040d5ee641452d91a41d032d91c3111ab556",
@@ -13,7 +13,9 @@
         "build.zig",
         "build.zig.zon",
         "src",
-        //"LICENSE",
+        "examples",
+        "tests",
+        "LICENSE",
         "README.md",
     },
 }
