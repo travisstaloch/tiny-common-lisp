@@ -1,7 +1,7 @@
-// TODO make streaming. replace src field with buffer and reader of some kind.
-// must be non seekable.
 const Tokenizer = @This();
 
+// TODO make streaming. replace src field with buffer and reader of some kind.
+// must be non seekable.
 src: [:0]const u8,
 file_path: []const u8,
 pos: u32 = 0,

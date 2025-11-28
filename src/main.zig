@@ -15,7 +15,7 @@ const flags = [_]flagset.Flag{
     }),
     .init([]const u8, "eval", .{ .short = 'e', .desc = "text to eval", .kind = .list }),
     .init([]const u8, "load", .{ .short = 'l', .desc = "file to load", .kind = .list }),
-    .init(bool, "banner", .{ .desc = "show banner", .default_value_ptr = &true }),
+    .init(bool, "banner", .{ .desc = "show banner.  default true.", .default_value_ptr = &true }),
 };
 
 pub fn main() !void {
@@ -32,7 +32,7 @@ pub fn main() !void {
         error.HelpRequested => {
             try stdout.print("{f}", .{flagset.fmtUsage(&flags, ": <35", .full,
                 \\
-                \\usage: tinylisp <options>
+                \\usage: tiny-common-lisp <options>
                 \\
                 \\
             )});
@@ -70,7 +70,7 @@ pub fn main() !void {
         }
     }
     if (args.parsed.load.items.len > 0) {
-        unreachable;
+        unreachable; // TODO
     }
     if (args.parsed.script.items.len > 0) {
         for (args.parsed.script.items) |script| {
