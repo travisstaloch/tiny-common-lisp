@@ -1,4 +1,11 @@
-# TODO
+# Test
+
+run `zig build test` and then diff output against `sbcl` on files in examples/ and tests/
+```
+./test.sh
+```
+
+# Roadmap
 
 * [ ] start using a test suite
   * [ ] https://github.com/tgutu/clunit

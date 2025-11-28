@@ -8,10 +8,6 @@
             .url = "git+https://github.com/travisstaloch/flagset#d3e3040d5ee641452d91a41d032d91c3111ab556",
             .hash = "flagset-0.0.1-AVmOhSIwAQDfvLgGTZVQKb8WTAXp1FEuxxk4C04eRnvy",
         },
-        // .anyline = .{
-        //     .url = "https://github.com/c-shinkle/anyline/archive/refs/tags/v0.2.0.tar.gz",
-        //     .hash = "anyline-0.2.0-PM_c78VvAADEDdg8fjJreQjtEOJXi_xupRFHuWaWGHR0",
-        // },
     },
     .paths = .{
         "build.zig",

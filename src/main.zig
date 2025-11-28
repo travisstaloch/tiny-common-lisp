@@ -46,12 +46,11 @@ pub fn main() !void {
     if (args.parsed.banner) {
         try stdout.print(
             // banner genrated at
-            // https://patorjk.com/software/taag/#p=display&f=Small+Block&t=TinyLisp&x=none&v=4&h=4&w=80&we=false
-            \\
-            \\  ▀▛▘▗       ▌  ▗       
-            \\   ▌ ▄ ▛▀▖▌ ▌▌  ▄ ▞▀▘▛▀▖
-            \\   ▌ ▐ ▌ ▌▚▄▌▌  ▐ ▝▀▖▙▄▘
-            \\   ▘ ▀▘▘ ▘▗▄▘▀▀▘▀▘▀▀ ▌  
+            // https://patorjk.com/software/taag/#p=display&f=Small+Block&t=tiny-common-lisp&x=none&v=4&h=4&w=80&we=false
+            \\  ▐  ▗                                 ▜ ▗       
+            \\  ▜▀ ▄ ▛▀▖▌ ▌▄▄▖▞▀▖▞▀▖▛▚▀▖▛▚▀▖▞▀▖▛▀▖▄▄▖▐ ▄ ▞▀▘▛▀▖
+            \\  ▐ ▖▐ ▌ ▌▚▄▌   ▌ ▖▌ ▌▌▐ ▌▌▐ ▌▌ ▌▌ ▌   ▐ ▐ ▝▀▖▙▄▘
+            \\   ▀ ▀▘▘ ▘▗▄▘   ▝▀ ▝▀ ▘▝ ▘▘▝ ▘▝▀ ▘ ▘    ▘▀▘▀▀ ▌  
             \\    TinyLisp 0.0.1
             \\
             \\args: {f}
@@ -116,7 +115,7 @@ fn run(
             if (src.len <= 1) break;
 
             _ = try p.run(src, name);
-            p.gcOld();
+            p.gc();
         },
         .script => |input_f| {
             var input = input_f.reader(&input_buf);
