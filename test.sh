@@ -1,4 +1,4 @@
-zig build test
+zig build test --summary all
 
 function check() {
     echo "check $1"

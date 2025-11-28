@@ -75,8 +75,6 @@
         (lambda (x)
           (let*
             ((y (- x (/ (- x (/ n x)) 2))))
-            ; (print (cons x y))
-            ; (if (< (abs (- x y)) 0.00001)
             (if (= x y)
                 x
                 (funcall f y))))))

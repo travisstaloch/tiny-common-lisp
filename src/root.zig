@@ -1,7 +1,9 @@
 //!
-//! adapted / inspired by
-//!   https://github.com/Robert-van-Engelen/tinylisp and
+//! adapted from / inspired by
+//!   https://github.com/Robert-van-Engelen/tinylisp
 //!   https://github.com/daneelsan/tinylisp/
+//! references
+//!   https://github.com/cryptocode/bio
 //!
 
 const Interp = @This();
@@ -169,12 +171,12 @@ pub const Expr = extern union {
     }
 };
 
-const ATOM = Expr.Tag.atom.int();
-const PRIM = Expr.Tag.prim.int();
-const CONS = Expr.Tag.cons.int();
-const CLOS = Expr.Tag.clos.int();
-const MACR = Expr.Tag.macr.int();
-const NIL_ = Expr.Tag.nil.int();
+pub const ATOM = Expr.Tag.atom.int();
+pub const PRIM = Expr.Tag.prim.int();
+pub const CONS = Expr.Tag.cons.int();
+pub const CLOS = Expr.Tag.clos.int();
+pub const MACR = Expr.Tag.macr.int();
+pub const NIL_ = Expr.Tag.nil.int();
 
 pub const nil = box(.nil, 0);
 
@@ -330,38 +332,38 @@ pub fn err(p: *Interp, e: Error, comptime fmt: []const u8, args: anytype) Error 
     return e;
 }
 
-pub fn gcOld(p: *Interp) void {
+pub fn gc(p: *Interp) void {
     p.sp = @intCast(p.env.ord());
 }
 
-fn carOpt(p: *Interp, x: Expr) ?Expr {
+pub fn carOpt(p: *Interp, x: Expr) ?Expr {
     return if (x.boxed.tag.isOneOf(&.{ CONS, CLOS, MACR }))
         p.memory[x.ord() + 1]
     else
         null;
 }
 
-fn car(p: *Interp, x: Expr) Error!Expr {
+pub fn car(p: *Interp, x: Expr) Error!Expr {
     return p.carOpt(x) orelse p.err(error.NonPair, "{f}", .{x.fmt(p)});
 }
 
 // TODO replace car with carAssume whenever CONS/CLOS/MACR is known
-fn carAssume(p: *Interp, x: Expr) Expr {
+pub fn carAssume(p: *Interp, x: Expr) Expr {
     return p.carOpt(x).?;
 }
 
-fn cdrOpt(p: *Interp, x: Expr) ?Expr {
+pub fn cdrOpt(p: *Interp, x: Expr) ?Expr {
     return if (x.boxed.tag.isOneOf(&.{ CONS, CLOS, MACR }))
         p.memory[x.ord()]
     else
         null;
 }
 
-fn cdr(p: *Interp, x: Expr) Error!Expr {
+pub fn cdr(p: *Interp, x: Expr) Error!Expr {
     return p.cdrOpt(x) orelse p.err(error.NonPair, "{f}", .{x.fmt(p)});
 }
 
-fn cdrAssume(p: *Interp, x: Expr) Expr {
+pub fn cdrAssume(p: *Interp, x: Expr) Expr {
     return p.cdrOpt(x).?;
 }
 
@@ -852,13 +854,6 @@ const primitives = struct {
     test defun {
         try testEval("4", "(defun double (x) (+ x x)) (double 2)");
     }
-    test "&rest" {
-        try testEval("(1 2 (3 4 5))",
-            \\(defun rest-as-list (a b &rest rest)
-            \\  (list a b rest))
-            \\(rest-as-list 1 2 3 4 5)
-        );
-    }
 };
 
 fn trace(comptime fmt: []const u8, args: anytype) void {
@@ -875,84 +870,10 @@ const Io = std.Io;
 const File = std.fs.File;
 const assert = std.debug.assert;
 const Tokenizer = @import("Tokenizer.zig");
-
-const testing = std.testing;
-const t_gpa = testing.allocator;
-
-fn expectExprEqual(expected: Expr.Fmt, actual: Expr.Fmt) !void {
-    // trace("{f}\n{f}\n", .{ expected, actual });
-    try testing.expectEqual(expected.e.boxed.tag, actual.e.boxed.tag);
-    const ep = expected.p;
-    const ap = actual.p;
-    switch (expected.e.boxed.tag.int()) {
-        ATOM => try testing.expectEqualStrings(
-            ep.atomName(expected.e),
-            ap.atomName(actual.e),
-        ),
-        CONS => {
-            try expectExprEqual(
-                ep.carAssume(expected.e).fmt(ep),
-                ap.carAssume(actual.e).fmt(ap),
-            );
-            try expectExprEqual(
-                ep.cdrAssume(expected.e).fmt(ep),
-                ap.cdrAssume(actual.e).fmt(ap),
-            );
-        },
-        else => try testing.expectEqual(expected.e.int, actual.e.int),
-    }
-}
-
-const TestCase = union(enum) {
-    file_path: []const u8,
-    src: []const u8,
-};
-
-fn testParseFmt(c: TestCase) !void {
-    var discarding = std.Io.Writer.Discarding.init(&.{});
-    const N = 4096 * 4;
-    var memory: [N]Expr = undefined;
-    var l: Interp = .init(&memory, &discarding.writer, .quiet);
-    const src = switch (c) {
-        .file_path => try std.fs.cwd().readFileAllocOptions(t_gpa, c.file_path, 100000, null, .of(u8), 0),
-        .src => try t_gpa.dupeZ(u8, c.src),
-    };
-    const file_path = switch (c) {
-        .file_path => c.file_path,
-        .src => "test",
-    };
-    defer t_gpa.free(src);
-    const e = try l.parse(src, file_path);
-    // trace("{s} {s}", .{ file_path, src });
-    // trace("e {f}", .{e.fmt(&l)});
-    const src2 = try std.fmt.allocPrintSentinel(t_gpa, "{f}", .{e.fmt(&l)}, 0);
-    // trace("{s}", .{src2});
-    defer t_gpa.free(src2);
-    var memory2: [N]Expr = undefined;
-    var l2: Interp = .init(&memory2, &discarding.writer, .quiet);
-    const e2 = try l2.parse(src2, file_path);
-    try expectExprEqual(e.fmt(&l), e2.fmt(&l2));
-}
-
-test "parse fmt rountrip" {
-    try testParseFmt(.{ .file_path = "examples/basic.lisp" });
-    try testParseFmt(.{ .file_path = "examples/fizzbuzz.lisp" });
-    try testParseFmt(.{ .file_path = "examples/sqrt.lisp" });
-    try testParseFmt(.{ .file_path = "tests/dotcall.lisp" });
-}
-
-fn testEval(expected: []const u8, src: [:0]const u8) !void {
-    var discarding = std.Io.Writer.Discarding.init(&.{});
-    const N = 4096 * 4;
-    var memory: [N]Expr = undefined;
-    var l: Interp = .init(&memory, &discarding.writer, .quiet);
-    const e = try l.run(src, "<testEval>");
-    try testing.expectFmt(expected, "{f}", .{e.fmt(&l)});
-}
+const tests = @import("tests.zig");
+const testEval = tests.testEval;
 
 test {
     _ = primitives;
-}
-test "nil sym" {
-    try testEval("()", "nil");
+    _ = tests;
 }
