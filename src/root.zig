@@ -162,7 +162,8 @@ pub const Expr = extern union {
         return .{ .e = e, .p = p };
     }
 
-    /// convert or check number n (does nothing, e.g. could check for NaN)
+    // TODO check tag
+    /// convert or check number n
     pub fn toNum(e: Expr) Expr {
         return e;
     }
@@ -333,19 +334,6 @@ pub fn gcOld(p: *Interp) void {
     p.sp = @intCast(p.env.ord());
 }
 
-pub fn gc(p: *Interp, x: Expr) Expr {
-    _ = p;
-    // TODO implement
-    return x;
-}
-
-pub fn rc(p: *Interp, x: *Expr, y: Expr) Expr {
-    _ = p;
-    _ = x;
-    // TODO implement
-    return y;
-}
-
 fn carOpt(p: *Interp, x: Expr) ?Expr {
     return if (x.boxed.tag.isOneOf(&.{ CONS, CLOS, MACR }))
         p.memory[x.ord() + 1]
@@ -485,11 +473,6 @@ fn doApply(p: *Interp, f: Expr, t: Expr, e: Expr) Error!Expr {
     };
 }
 
-fn dup(_: *Interp, x: Expr) Expr {
-    // TODO implement
-    return x;
-}
-
 fn eval(p: *Interp, t: Expr, e: Expr) Error!Expr {
     errdefer trace("eval error on {f}", .{t.fmt(p)});
     const ret = switch (t.boxed.tag.int()) {
@@ -530,19 +513,6 @@ pub fn fromBool(p: *Interp, b: bool) Expr {
 pub const Prim = std.meta.DeclEnum(primitives);
 pub const prims_len = @typeInfo(Prim).@"enum".fields.len;
 
-fn isPrimTailCall(p: Prim) bool {
-    return switch (p) {
-        .cond,
-        .@"if",
-        .@"let*",
-        // .let,
-        // .@"letrec*",
-        // .letrec,
-        => true,
-        else => false,
-    };
-}
-
 // TODO maybe accept `p: *primitives` instead of *Interp and do
 // @fieldParentPtr mixins
 const primitives = struct {
@@ -553,7 +523,7 @@ const primitives = struct {
     /// (quote x) special form, returns x unevaluated "as is"
     pub fn quote(p: *Interp, t: Expr, _: Expr) Error!Expr {
         if (!(try p.cdr(t)).not()) return p.err(error.User, "quote expected one arg. found {f}", .{t.fmt(p)});
-        return p.dup(try p.car(t));
+        return try p.car(t);
     }
     /// (cons x y) construct pair (x . y)
     pub fn cons(p: *Interp, t: Expr, e: Expr) Error!Expr {
@@ -730,10 +700,10 @@ const primitives = struct {
     }
     /// (if x y z) if x then y else z
     pub fn @"if"(p: *Interp, t: Expr, e: Expr) Error!Expr {
-        const cnd = p.gc(try p.eval(try p.car(t), e));
+        const cnd = try p.eval(try p.car(t), e);
         const branches = try p.cdr(t);
         const res = try p.car(if (cnd.not()) try p.cdr(branches) else branches);
-        trace("if cnd {f} branches {f} res {f}", .{ cnd.fmt(p), branches.fmt(p), res.fmt(p) });
+        // trace("if cnd {f} branches {f} res {f}", .{ cnd.fmt(p), branches.fmt(p), res.fmt(p) });
         return try p.eval(res, e);
     }
     /// (defvar v x) define a named value globally
@@ -829,7 +799,6 @@ const primitives = struct {
         return try p.run(mem[0..len :0], name);
     }
     pub fn macro(p: *Interp, t: Expr, _: Expr) Error!Expr {
-        // L f_macro(L t,L *_) { return macro(dup(car(t)),dup(car(cdr(t)))); }
         return p.macro(try p.car(t), try p.car(try p.cdr(t)));
     }
     /// object equality - whether two objects are the same object in memory
