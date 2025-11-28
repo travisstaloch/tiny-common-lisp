@@ -12,4 +12,4 @@ function check() {
 check examples/basic.lisp
 check examples/fizzbuzz.lisp
 check examples/sqrt.lisp
-check tests/dotcall.lisp
+check tests/misc.lisp

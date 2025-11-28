@@ -1,9 +1,11 @@
 # Test
 
 run `zig build test` and then diff output against `sbcl` on files in examples/ and tests/
+
 ```
-./test.sh
+./tests/run-all.sh
 ```
+
 
 # Roadmap
 

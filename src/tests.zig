@@ -63,7 +63,7 @@ test "parse fmt rountrip" {
     try testParseFmt(.{ .file_path = "examples/basic.lisp" });
     try testParseFmt(.{ .file_path = "examples/fizzbuzz.lisp" });
     try testParseFmt(.{ .file_path = "examples/sqrt.lisp" });
-    try testParseFmt(.{ .file_path = "tests/dotcall.lisp" });
+    try testParseFmt(.{ .file_path = "tests/misc.lisp" });
 }
 
 pub fn testEval(expected: []const u8, src: [:0]const u8) !void {
