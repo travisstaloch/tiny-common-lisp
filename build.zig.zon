@@ -8,6 +8,10 @@
             .url = "git+https://github.com/travisstaloch/flagset#d3e3040d5ee641452d91a41d032d91c3111ab556",
             .hash = "flagset-0.0.1-AVmOhSIwAQDfvLgGTZVQKb8WTAXp1FEuxxk4C04eRnvy",
         },
+        .RegionAllocator = .{
+            .url = "git+https://codeberg.org/archaistvolts/RegionAllocator/#c34d7108da604082448de3334ec5f715009e1127",
+            .hash = "RegionAllocator-0.0.1-4HCJzSNDAAAlYOBBJOadKS-9bxC3889W9eBz0QBrLQBe",
+        },
     },
     .paths = .{
         "build.zig",

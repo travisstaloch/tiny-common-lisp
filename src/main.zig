@@ -61,8 +61,8 @@ pub fn main() !void {
         try stdout.flush();
     }
 
-    var memory: [1024 * 16]TinyLisp.Expr = undefined;
-    var p: TinyLisp = .init(&memory, stdout, .quiet);
+    var memory: [1024 * 16 * @sizeOf(TinyLisp.Expr)]u8 align(16) = undefined;
+    var p: TinyLisp = try .init(&memory, stdout, .quiet);
 
     if (args.parsed.eval.items.len > 0) {
         for (args.parsed.eval.items) |eval| {
@@ -102,7 +102,7 @@ fn run(
     switch (mode) {
         .repl => |input_f| while (true) {
             p.print_mode = .repl;
-            try p.w.print("{: >4}> ", .{p.sp - p.hp / 8});
+            try p.w.print("{: >4}> ", .{p.rootRegion().bytesUsed() / 8});
             try p.w.flush();
             wa.clearRetainingCapacity();
 

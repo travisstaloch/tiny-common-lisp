@@ -7,11 +7,13 @@ pub fn build(b: *std.Build) void {
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "trace", b.option(bool, "trace", "") orelse false);
 
+    const RegionAllocator = b.dependency("RegionAllocator", .{});
     const mod = b.addModule("tiny-common-lisp", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .imports = &.{
             .{ .name = "build-options", .module = build_opts.createModule() },
+            .{ .name = "Region", .module = RegionAllocator.module("RegionAllocator") },
         },
     });
     const flagset = b.dependency("flagset", .{});
@@ -21,6 +23,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "flagset", .module = flagset.module("flagset") },
+            .{ .name = "Region", .module = RegionAllocator.module("RegionAllocator") },
             .{ .name = "build-options", .module = build_opts.createModule() },
         },
     });
@@ -42,6 +45,7 @@ pub fn build(b: *std.Build) void {
     const run_mod_tests = b.addRunArtifact(mod_tests);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
+    b.installArtifact(mod_tests);
 
     const exe_check = b.addExecutable(.{ .name = "check", .root_module = exe_mod });
     const check = b.step("check", "Check if everything compiles");
